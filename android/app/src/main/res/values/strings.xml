@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">错见</string>
+    <string name="title_activity_main">错见</string>
+    <string name="package_name">com.xiaoyang.cuojian</string>
+    <string name="custom_url_scheme">com.xiaoyang.cuojian</string>
+</resources>
