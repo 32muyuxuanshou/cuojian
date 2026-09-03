@@ -1,0 +1,46 @@
+name: Build signed Android release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+      - run: npm ci
+      - run: npm run android:sync
+      - run: chmod +x android/gradlew
+      - name: Restore signing key
+        shell: bash
+        run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/cuojian.keystore"
+      - name: Build signed APK
+        working-directory: android
+        env:
+          CUOJIAN_KEYSTORE_PATH: ${{ runner.temp }}/cuojian.keystore
+          CUOJIAN_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          CUOJIAN_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          CUOJIAN_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease
+      - name: Prepare APK
+        shell: bash
+        run: cp android/app/build/outputs/apk/release/app-release.apk "cuojian-${GITHUB_REF_NAME}.apk"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: cuojian-${{ github.ref_name }}.apk
+          generate_release_notes: true
