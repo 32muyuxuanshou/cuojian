@@ -6,6 +6,7 @@ export function validateBackup(value: unknown): WrongQuestion[] {
   for(const q of records) {
     if (!q || typeof q.id!=='string' || !q.id || ids.has(q.id)) throw new Error('题目ID缺失或重复');
     ids.add(q.id);
+    if(q.material && (typeof q.material.id!=='string' || !q.material.id || typeof q.material.title!=='string' || typeof q.material.text!=='string' || !Number.isFinite(Date.parse(q.material.updatedAt)) || !Array.isArray(q.material.images) || !q.material.images.every(src=>typeof src==='string' && src.startsWith('data:image/')))) throw new Error('共享资料格式错误');
     for(const key of ['createdAt','updatedAt','nextReviewAt'] as const) if(!Number.isFinite(Date.parse(q[key]))) throw new Error('日期格式错误');
     for(const key of ['source','stem','module','topic','correctAnswer'] as const) if(typeof q[key]!=='string') throw new Error('题目字段不完整');
     if (!q.options || typeof q.options!=='object' || Array.isArray(q.options) || !Object.values(q.options).every(v=>typeof v==='string') || !Array.isArray(q.tags) || !q.tags.every(t=>typeof t==='string') || !Array.isArray(q.attempts)) throw new Error('题目结构错误');

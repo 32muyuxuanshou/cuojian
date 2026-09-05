@@ -1,5 +1,6 @@
 import type { WrongQuestion } from './models';
 import { rememberDeletion } from './github-sync';
+import { reconcileMaterials } from './materials';
 
 const DB_NAME = 'cuojian-local';
 const STORE = 'questions';
@@ -60,6 +61,25 @@ export async function saveIfUnchanged(question: WrongQuestion, expectedUpdatedAt
   });
 }
 
+export async function saveMaterialSet(children:WrongQuestion[], consumed:WrongQuestion[] = [], baseline:WrongQuestion[] = []):Promise<void> {
+  const db=await openDb();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(STORE,'readwrite');const store=tx.objectStore(STORE);
+    const get=store.getAll();
+    get.onsuccess=()=>{
+      const all=get.result as WrongQuestion[];
+      const byId=new Map(all.map(q=>[q.id,q]));
+      if([...baseline,...consumed].some(q=>!byId.has(q.id) || byId.get(q.id)!.updatedAt!==q.updatedAt || byId.get(q.id)!.deletedAt)) {tx.abort();return;}
+      for(const child of children) byId.set(child.id,child);
+      for(const old of consumed) if(!children.some(q=>q.id===old.id)) byId.set(old.id,{...old,deletedAt:new Date().toISOString(),updatedAt:new Date().toISOString()});
+      for(const q of reconcileMaterials([...byId.values()])) store.put(q);
+    };
+    tx.oncomplete=()=>{db.close();notifyDataChanged('replace');resolve();};
+    tx.onabort=()=>{db.close();reject(new Error('题目在编辑期间已变化，请重新打开资料题组后再保存。'));};
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+
 export async function deleteQuestion(id: string): Promise<void> {
   return trashQuestions([id]);
 }
@@ -92,9 +112,10 @@ export async function applySyncResults(before: WrongQuestion[], incoming: WrongQ
       for (const [id, old] of baseline) {
         const local = current.get(id);
         if (!local || JSON.stringify({ ...local, capturedAt: local.capturedAt || local.createdAt }) !== old) continue;
-        if (remote.has(id)) store.put(remote.get(id)!); else store.delete(id);
+        if (remote.has(id)) { store.put(remote.get(id)!); current.set(id,remote.get(id)!); } else {store.delete(id);current.delete(id);}
       }
-      for (const q of incoming) if (!baseline.has(q.id) && !current.has(q.id)) store.put(q);
+      for (const q of incoming) if (!baseline.has(q.id) && !current.has(q.id)) {store.put(q);current.set(q.id,q);}
+      for (const q of reconcileMaterials([...current.values()])) store.put(q);
     };
     tx.oncomplete = () => { db.close(); resolve(); };
     tx.onerror = () => reject(tx.error);
@@ -120,7 +141,7 @@ export async function replaceAllQuestions(questions: WrongQuestion[], notify = t
     old.onsuccess = () => {
       tx.objectStore('recovery').put(old.result, 'before-import');
       store.clear();
-      questions.forEach((question) => store.put(question));
+      reconcileMaterials(questions).forEach((question) => store.put(question));
     };
     tx.oncomplete = () => { db.close(); if (notify) notifyDataChanged('replace'); resolve(); };
     tx.onerror = () => reject(tx.error);

@@ -1,4 +1,5 @@
 import type { AiSettings, WrongQuestion } from './models';
+import { questionContext,questionImages } from './materials';
 import { requestDeepSeek } from './deepseek-client';
 import { listQuestions, saveIfUnchanged } from './local-db';
 
@@ -20,8 +21,8 @@ export async function organizeOne(q: WrongQuestion, settings: AiSettings) {
   if (!await saveIfUnchanged(start, q.updatedAt)) return false;
   try {
     const history = (await listQuestions()).filter(x => x.id !== q.id && !x.inbox && !x.isDemo && x.topic && x.topic === q.topic).slice(0,5).map(x => ({ id:x.id, topic:x.topic, personalCause:x.attempts.filter(a => a.personalCause).at(-1)?.personalCause }));
-    const images = [q.imageDataUrl, ...(q.extraImages || []).map(i => i.dataUrl), q.answerAnalysisImageDataUrl].filter(Boolean) as string[];
-    const data = validateOrganized(await requestDeepSeek({ ...settings, action:'organize', imageDataUrls:images, question:{ stem:q.stem, options:q.options, source:q.source, module:q.module, topic:q.topic, correctAnswer:q.answerConfirmed ? q.correctAnswer : '', myAnswer:q.attempts[0]?.answer, personalCause:q.attempts[0]?.personalCause, imageRoles:['question', ...(q.extraImages || []).map(i => i.role), ...(q.answerAnalysisImageDataUrl ? ['analysis'] : [])] }, history }));
+    const images = questionImages(q);
+    const data = validateOrganized(await requestDeepSeek({ ...settings, action:'organize', imageDataUrls:images.map(i=>i.dataUrl), question:{ ...questionContext(q), stem:q.stem, options:q.options, source:q.source, module:q.module, topic:q.topic, correctAnswer:q.answerConfirmed ? q.correctAnswer : '', myAnswer:q.attempts[0]?.answer, personalCause:q.attempts[0]?.personalCause, imageRoles:images.map(i=>i.role) }, history }));
     const conflict = q.answerConfirmed && !!data.suggestedAnswer && data.suggestedAnswer !== q.correctAnswer;
     const issues = [...data.issues, ...(conflict ? ['AI结论与已确认答案不一致，请核对'] : []), ...(!q.answerConfirmed ? ['正确答案尚未由你确认'] : [])];
     const now = new Date().toISOString();

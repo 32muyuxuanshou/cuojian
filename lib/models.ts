@@ -33,6 +33,8 @@ export interface QuestionMessage {
 
 export interface WrongQuestion {
   id: string;
+  material?: SharedMaterial;
+  subquestionNumber?: string;
   capturedAt?: string;
   organizedAt?: string;
   deletedAt?: string;
@@ -68,6 +70,14 @@ export interface WrongQuestion {
   conversationSummary?: string;
   classificationPending?: boolean;
   isDemo?: boolean;
+}
+
+export interface SharedMaterial {
+  id: string;
+  title: string;
+  text: string;
+  images: string[];
+  updatedAt: string;
 }
 
 export interface AiSettings {

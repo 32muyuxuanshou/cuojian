@@ -13,6 +13,8 @@ import { Progress } from '@/components/ui/progress';
 import { Textarea } from '@/components/ui/textarea';
 import { DATA_CHANGED_EVENT, applySyncResults, restoreBeforeImport, saveIfUnchanged, trashQuestions, deleteQuestion, listQuestions, replaceAllQuestions, saveQuestion, seedQuestions } from '@/lib/local-db';
 import { validateBackup, mergeBackup } from '@/lib/backup';
+import { MaterialSetEditor, MaterialView } from '@/components/material-set';
+import { questionContext, questionImages } from '@/lib/materials';
 import { Inbox } from '@/components/inbox';
 import { matchesDate, captureDate } from '@/lib/capture';
 import { DEEPSEEK_MODEL } from '@/lib/deepseek-client-config';
@@ -23,7 +25,7 @@ import { topicTaxonomy } from '@/lib/gongkao-skill';
 import { APP_VERSION, checkForUpdate, installUpdate, type AvailableUpdate } from '@/lib/app-update';
 import { listSyncConflicts, resolveSyncConflict, syncWithGithub } from '@/lib/github-sync';
 
-type View = 'dashboard' | 'library' | 'inbox' | 'add' | 'edit' | 'stats' | 'settings' | 'detail' | 'practice' | 'review';
+type View = 'dashboard' | 'library' | 'inbox' | 'materialSet' | 'add' | 'edit' | 'stats' | 'settings' | 'detail' | 'practice' | 'review';
 type ClassificationResult = {
   stem?: string;
   detectedSource?: string;
@@ -38,6 +40,9 @@ const selectClass = 'h-10 w-full rounded-xl border border-input bg-card px-3 tex
 const defaultGithubSync: GithubSyncSettings = { owner: '32muyuxuanshou', dataRepo: 'cuojian-data', branch: 'main', token: '', passphrase: '', autoSync: true };
 
 export function CuojianApp() {
+  const [materialSeed,setMaterialSeed] = useState<WrongQuestion[]>([]);
+  const [materialExisting,setMaterialExisting] = useState(false);
+  function openMaterialSet(seed:WrongQuestion[] = [],existing=false){setMaterialSeed(seed);setMaterialExisting(existing);setView('materialSet');}
   const [questions, setQuestions] = useState<WrongQuestion[]>([]);
   const [view, setView] = useState<View>('dashboard');
   const [selectedId, setSelectedId] = useState<string>();
@@ -176,10 +181,12 @@ export function CuojianApp() {
             <Dashboard questions={questions} due={due} correctAttempts={correctAttempts} mastery={mastery} onAdd={() => navigate('add')} onSearch={() => navigate('library')} onOpen={openQuestion} onStartPractice={() => startSession('practice', due, true)} onStartReview={() => startSession('review', due, true)} />
           ) : view === 'library' ? (
             <Library questions={archived} search={search} setSearch={setSearch} onOpen={openQuestion} onStart={startSession} onChanged={refresh} onInbox={() => navigate('inbox')} />
+          ) : view === 'materialSet' ? (
+            <MaterialSetEditor seed={materialSeed} existing={materialExisting} onCancel={()=>navigate('inbox')} onSaved={async()=>{await refresh();navigate('inbox');}} />
           ) : view === 'inbox' ? (
-            <Inbox questions={questions} settings={settings} onChanged={refresh} onEdit={id => { setSelectedId(id); setView('edit'); }} onStart={startSession} />
+            <Inbox onMaterialSet={seed=>openMaterialSet(seed)} questions={questions} settings={settings} onChanged={refresh} onEdit={id => { setSelectedId(id); setView('edit'); }} onStart={startSession} />
           ) : view === 'add' || (view === 'edit' && selected) ? (
-            <><div className="mb-4"><Button variant="outline" onClick={()=>navigate('inbox')}>截图快速收录 / 待整理箱</Button></div><AddQuestion settings={settings} initialQuestion={view === 'edit' ? selected : undefined} onCancel={() => navigate(view === 'edit' ? 'detail' : 'dashboard')} onSaved={async (q) => { await refresh(); navigate(q.inbox ? 'inbox' : view === 'edit' ? 'detail' : 'library'); }} /></>
+            <><div className="mb-4"><Button variant="outline" onClick={()=>navigate('inbox')}>截图快速收录 / 待整理箱</Button><Button className="ml-2" onClick={()=>openMaterialSet()}>资料分析：一份资料＋多道小题</Button></div><AddQuestion settings={settings} initialQuestion={view === 'edit' ? selected : undefined} onCancel={() => navigate(view === 'edit' ? 'detail' : 'dashboard')} onSaved={async (q) => { await refresh(); navigate(q.inbox ? 'inbox' : view === 'edit' ? 'detail' : 'library'); }} /></>
           ) : view === 'stats' ? (
             <Stats questions={questions} settings={settings} onOpen={openQuestion} onStart={startSession} />
           ) : view === 'settings' ? (
@@ -187,7 +194,7 @@ export function CuojianApp() {
           ) : view === 'practice' || view === 'review' ? (
             <ReviewSession mode={view} questions={sessionQuestions} settings={settings} mastery={mastery} isTodaySession={sessionIsToday} onBack={() => navigate('dashboard')} onChanged={refresh} />
           ) : selected ? (
-            <QuestionDetail question={selected} questions={questions} settings={settings} onBack={() => navigate('library')} onEdit={() => navigate('edit')} onChanged={refresh} />
+            <QuestionDetail onMaterialSet={()=>openMaterialSet(selected.material ? questions.filter(q=>q.material?.id===selected.material?.id) : [selected],true)} question={selected} questions={questions} settings={settings} onBack={() => navigate('library')} onEdit={() => navigate('edit')} onChanged={refresh} />
           ) : <Empty title="没有找到这道题" action="返回错题库" onAction={() => navigate('library')} />}
         </section>
         <MobileNav view={view} navigate={navigate} />
@@ -229,10 +236,10 @@ function Dashboard({ questions, due, correctAttempts, mastery, onAdd, onSearch, 
   </>;
 }
 
-type FilterGroup = 'sources' | 'modules' | 'topics' | 'causes' | 'tags';
+type FilterGroup = 'sources' | 'sets' | 'modules' | 'topics' | 'causes' | 'tags';
 
 function Library({ questions, search, setSearch, onOpen, onStart, onChanged, onInbox }: { questions: WrongQuestion[]; search: string; setSearch: (v: string) => void; onOpen: (id: string) => void; onStart: (mode: 'practice' | 'review', questions: WrongQuestion[]) => void; onChanged: () => Promise<void>; onInbox: () => void }) {
-  const [filters, setFilters] = useState<Record<FilterGroup, string[]>>({ sources: [], modules: [], topics: [], causes: [], tags: [] });
+  const [filters, setFilters] = useState<Record<FilterGroup, string[]>>({ sources: [], sets: [], modules: [], topics: [], causes: [], tags: [] });
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [period, setPeriod] = useState('all');
   const [from, setFrom] = useState('');
@@ -247,6 +254,7 @@ function Library({ questions, search, setSearch, onOpen, onStart, onChanged, onI
   }
   const facets = {
     sources: unique(questions.map((q) => q.source)),
+    sets: unique(questions.map(q=>q.material?.title || '')),
     modules: unique(questions.map(q => q.module)),
     topics: unique(questions.map((q) => q.topic)),
     causes: unique(questions.flatMap((q) => q.attempts.map((a) => a.causeType).filter(Boolean) as string[])),
@@ -254,6 +262,7 @@ function Library({ questions, search, setSearch, onOpen, onStart, onChanged, onI
   };
   const activeFilters: Record<FilterGroup, string[]> = {
     sources: filters.sources.filter((value) => facets.sources.includes(value)),
+    sets: filters.sets.filter(value=>facets.sets.includes(value)),
     modules: filters.modules.filter((value) => facets.modules.includes(value)),
     topics: filters.topics.filter((value) => facets.topics.includes(value)),
     causes: filters.causes.filter((value) => facets.causes.includes(value)),
@@ -263,9 +272,10 @@ function Library({ questions, search, setSearch, onOpen, onStart, onChanged, onI
   const selectedCount = Object.values(activeFilters).flat().length;
   const toggleQuestion = (id: string) => setSelectedIds((previous) => previous.includes(id) ? previous.filter((value) => value !== id) : [...previous, id]);
   const filtered = questions.filter((q) => {
-    const haystack = [q.stem, q.source, q.module, q.topic, ...q.tags, ...q.attempts.map((a) => `${a.causeType} ${a.personalCause}`)].join(' ').toLowerCase();
+    const haystack = [q.stem, q.material?.title, q.material?.text, q.subquestionNumber, q.source, q.module, q.topic, ...q.tags, ...q.attempts.map((a) => `${a.causeType} ${a.personalCause}`)].join(' ').toLowerCase();
     const causes = q.attempts.map((a) => a.causeType).filter(Boolean) as string[];
     return matchesDate(q, period, from, to) && haystack.includes(search.trim().toLowerCase())
+      && (!activeFilters.sets.length || !!q.material && activeFilters.sets.includes(q.material.title))
       && (!activeFilters.sources.length || activeFilters.sources.includes(q.source))
       && (!activeFilters.modules.length || activeFilters.modules.includes(q.module))
       && (!activeFilters.topics.length || activeFilters.topics.includes(q.topic))
@@ -279,7 +289,7 @@ function Library({ questions, search, setSearch, onOpen, onStart, onChanged, onI
   return <><PageHeader eyebrow="本地资料库" title="错题库" description="同组标签可多选，不同分组会组合筛选。" />
     <div className="mt-4 flex flex-wrap gap-2"><Button onClick={onInbox}><FileImage /> 待整理箱 · 悬浮收题 · 最近删除</Button><select aria-label="收录时间" className={selectClass + ' !w-auto'} value={period} onChange={e => setPeriod(e.target.value)}>{[['all','全部收录时间'],['today','今天收录'],['yesterday','昨天收录'],['7','近7天'],['30','近30天'],['custom','自定义日期']].map(([v,l]) => <option key={v} value={v}>{l}</option>)}</select>{period === 'custom' && <><Input aria-label="开始日期" type="date" className="w-auto" value={from} onChange={e => setFrom(e.target.value)} /><Input aria-label="结束日期" type="date" className="w-auto" value={to} onChange={e => setTo(e.target.value)} /></>}<select aria-label="排序" className={selectClass + ' !w-auto'} value={sort} onChange={e => setSort(e.target.value)}><option value="captured-desc">最近收录优先</option><option value="captured-asc">最早收录优先</option><option value="updated">最近更新优先</option></select>{selectedIds.length > 0 && <Button variant="outline" disabled={deleting} onClick={removeSelected}><Trash2 /> 批量删除 {selectedIds.length} 道</Button>}</div>
     <div className="mt-7 flex flex-col gap-3"><div className="relative"><Search className="absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input value={search} onChange={(e) => setSearch(e.target.value)} className="h-12 rounded-xl bg-card pl-10" placeholder="搜索题干、标签、来源或个人错因" />{search && <button aria-label="清空搜索" className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground" onClick={() => setSearch('')}><X className="size-4" /></button>}</div>
-      <div className="space-y-3 rounded-[18px] border bg-card p-4">{([['sources', '来源'], ['modules', '模块'], ['topics', '考点'], ['causes', '错因'], ['tags', '标签']] as const).map(([group, label]) => facets[group].length > 0 && <div key={group} className="grid gap-2 sm:grid-cols-[52px_minmax(0,1fr)]"><span className="pt-1.5 text-xs font-semibold text-[#a85b3d]">{label}</span><div className="flex flex-wrap gap-2">{facets[group].map((value) => <button key={value} onClick={() => toggle(group, value)} aria-pressed={filters[group].includes(value)} className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${filters[group].includes(value) ? 'border-primary bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:border-primary/35 hover:text-foreground'}`}>{value}</button>)}</div></div>)}{selectedCount > 0 && <button className="text-xs text-muted-foreground underline underline-offset-4" onClick={() => setFilters({ sources: [], modules: [], topics: [], causes: [], tags: [] })}>清除全部 {selectedCount} 个筛选</button>}</div></div>
+      <div className="space-y-3 rounded-[18px] border bg-card p-4">{([['sources', '来源'], ['sets', '资料题组'], ['modules', '模块'], ['topics', '考点'], ['causes', '错因'], ['tags', '标签']] as const).map(([group, label]) => facets[group].length > 0 && <div key={group} className="grid gap-2 sm:grid-cols-[52px_minmax(0,1fr)]"><span className="pt-1.5 text-xs font-semibold text-[#a85b3d]">{label}</span><div className="flex flex-wrap gap-2">{facets[group].map((value) => <button key={value} onClick={() => toggle(group, value)} aria-pressed={filters[group].includes(value)} className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${filters[group].includes(value) ? 'border-primary bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:border-primary/35 hover:text-foreground'}`}>{value}</button>)}</div></div>)}{selectedCount > 0 && <button className="text-xs text-muted-foreground underline underline-offset-4" onClick={() => setFilters({ sources: [], sets: [], modules: [], topics: [], causes: [], tags: [] })}>清除全部 {selectedCount} 个筛选</button>}</div></div>
     <div className="mt-5 flex flex-wrap items-center justify-between gap-3 text-sm"><span className="text-muted-foreground">找到 {filtered.length} 道 · 已选 {selectedIds.length} 道</span><div className="flex flex-wrap items-center gap-3"><button disabled={!filtered.length} aria-pressed={allFilteredSelected} className="flex items-center gap-1.5 text-xs font-medium text-primary disabled:opacity-40" onClick={toggleFilteredSelection}><span className={`grid size-4 place-items-center rounded border ${allFilteredSelected ? 'border-primary bg-primary text-primary-foreground' : 'bg-card'}`}>{allFilteredSelected && <Check className="size-3" />}</span>{allFilteredSelected ? '取消当前全选' : '全选当前结果'}</button><button aria-pressed={allQuestionsSelected} className="text-xs font-medium text-primary" onClick={toggleAllSelection}>{allQuestionsSelected ? '取消全部' : `全选全部 ${questions.length} 道`}</button><span className="flex items-center gap-1 text-xs text-muted-foreground"><Filter className="size-3.5" /> 按所选顺序</span></div></div>
     {selectedIds.length > 0 && <div className="mt-3 flex flex-wrap items-center gap-3 rounded-[18px] border border-primary/20 bg-[#eef2f0] p-3"><span className="mr-auto text-sm font-medium">用已选的 {selectedIds.length} 道题创建练习</span><Button variant="outline" size="sm" onClick={() => onStart('review', questions.filter((q) => selectedIds.includes(q.id)))}><BookOpenCheck /> 复习模式</Button><Button size="sm" onClick={() => onStart('practice', questions.filter((q) => selectedIds.includes(q.id)))}><Check /> 写题模式</Button><button aria-label="清空选题" className="p-1 text-muted-foreground" onClick={() => setSelectedIds([])}><X className="size-4" /></button></div>}
     {filtered.length ? <div className="mt-3 overflow-hidden rounded-[22px] border bg-card">{filtered.map((q, index) => <QuestionRow key={q.id} question={q} border={index !== filtered.length - 1} onClick={() => onOpen(q.id)} selected={selectedIds.includes(q.id)} onSelect={() => toggleQuestion(q.id)} />)}</div> : <Empty title="没有匹配的错题" body="换一个关键词或模块试试。" />}</>;
@@ -317,7 +327,7 @@ function AddQuestion({ settings, initialQuestion, onCancel, onSaved }: { setting
     if (!image) { setMessage('请先选择题目图片。'); return; }
     setBusy(true); setMessage('');
     try {
-      const data = await requestDeepSeek<ClassificationResult>({ ...settings, action: 'classify', imageDataUrl: image });
+      const data = await requestDeepSeek<ClassificationResult>({ ...settings, action: 'classify', imageDataUrls:[...(initialQuestion?.material?.images || []),image], question:initialQuestion ? questionContext(initialQuestion) : undefined });
       setForm((prev) => ({ ...prev, stem: data.stem || prev.stem, source: data.detectedSource || prev.source, sourceVerified: false, module: data.module || prev.module, topic: data.topic || prev.topic, tags: Array.isArray(data.tags) ? data.tags.join('、') : prev.tags, A: data.options?.A || prev.A, B: data.options?.B || prev.B, C: data.options?.C || prev.C, D: data.options?.D || prev.D }));
       setMessage(data.uncertainties?.length ? `DeepSeek 有 ${data.uncertainties.length} 处不确定，请重点核对。` : '已完成识别和归类，请核对后保存。');
     } catch (error) { setMessage(error instanceof Error ? error.message : '归类失败'); }
@@ -330,7 +340,8 @@ function AddQuestion({ settings, initialQuestion, onCancel, onSaved }: { setting
     setBusy(true); setMessage('');
     try {
       const options = Object.fromEntries((['A', 'B', 'C', 'D'] as const).filter((key) => form[key]).map((key) => [key, form[key]]));
-      const result = await requestDeepSeek<AiAnalysis>({ ...settings, action: 'analyze', imageDataUrls: [image, answerAnalysisImage], question: { stem: form.stem, options, correctAnswer: form.correctAnswer, myAnswer: form.myAnswer, personalCause: form.personalCause, module: form.module, topic: form.topic, imageOrder: answerAnalysisImage ? '第一张是题目原图，第二张是用户提供的解析参考（来源未验证）；核对参考但不要盲从。' : '图片为题目原图。' }, history: [] });
+      const analysisImages = [...(initialQuestion?.material?.images || []).map(dataUrl => ({ dataUrl, role: 'shared-material' })), ...(image ? [{ dataUrl: image, role: 'current-question' }] : []), ...(answerAnalysisImage ? [{ dataUrl: answerAnalysisImage, role: 'analysis' }] : [])];
+      const result = await requestDeepSeek<AiAnalysis>({ ...settings, action: 'analyze', imageDataUrls: analysisImages.map(item => item.dataUrl), question: { ...(initialQuestion ? questionContext(initialQuestion) : {}), stem: form.stem, options, correctAnswer: form.correctAnswer, myAnswer: form.myAnswer, personalCause: form.personalCause, module: form.module, topic: form.topic, imageRoles: analysisImages.map(item => item.role), imageOrder: '图片顺序对应imageRoles：shared-material是公共资料，current-question是当前小题，analysis是用户提供的解析参考（来源未验证）；核对参考但不要盲从。' }, history: [] });
       setAnalysisDraft(result);
       setForm((previous) => ({ ...previous, correctReasoning: result.correctReasoning || previous.correctReasoning, pitfall: result.pitfall || previous.pitfall }));
       setMessage('AI解析草稿已填入，请核对和修改后再保存。');
@@ -454,6 +465,7 @@ function ReviewSession({ mode, questions, settings, mastery, isTodaySession, onB
 
   return <><div className="flex items-center justify-between"><button onClick={onBack} className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="size-4" /> 退出{mode === 'practice' ? '写题' : '复习'}</button><span className="text-xs text-muted-foreground">{index + 1} / {queue.length}</span></div><Progress value={(index + 1) / queue.length * 100} className="mt-4 h-1.5" />
     <section className="mx-auto mt-6 max-w-4xl rounded-[22px] border bg-card p-5 shadow-[0_12px_40px_rgba(28,42,47,.05)] sm:p-8">
+      <MaterialView material={question.material} />
       {question.imageDataUrl && <>{/* oxlint-disable-next-line next/no-img-element -- 本地 data URL 不适合图片优化器 */}<img src={question.imageDataUrl} alt="题目原图" className="mb-6 max-h-[480px] w-full rounded-xl border bg-white object-contain" /></>}
       {question.extraImages?.filter(i=>i.role!=='analysis').map(i=><img key={i.id} src={i.dataUrl} alt="题目材料" className="mb-4 max-h-[480px] w-full object-contain" />)}
       <p className="whitespace-pre-wrap text-[16px] font-medium leading-8 sm:text-lg">{question.stem}</p>
@@ -466,7 +478,7 @@ function ReviewSession({ mode, questions, settings, mastery, isTodaySession, onB
   </>;
 }
 
-function QuestionDetail({ question, questions, settings, onBack, onEdit, onChanged }: { question: WrongQuestion; questions: WrongQuestion[]; settings: AiSettings; onBack: () => void; onEdit: () => void; onChanged: () => void }) {
+function QuestionDetail({ question, questions, settings, onBack, onEdit, onChanged, onMaterialSet }: { onMaterialSet:()=>void; question: WrongQuestion; questions: WrongQuestion[]; settings: AiSettings; onBack: () => void; onEdit: () => void; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [chatInput, setChatInput] = useState('');
@@ -477,7 +489,7 @@ function QuestionDetail({ question, questions, settings, onBack, onEdit, onChang
     setBusy(true); setMessage('');
     const history = questions.filter((q) => q.id !== question.id && !q.inbox && !q.isDemo && (q.topic === question.topic || q.tags.some(t => question.tags.includes(t)))).slice(0, 5).map((q) => ({ id: q.id, topic: q.topic, cause: q.attempts.at(-1)?.personalCause, results: q.attempts.map((a) => a.correct) }));
     try {
-      const analysis = await requestDeepSeek<AiAnalysis>({ ...settings, action: 'analyze', imageDataUrl: question.imageDataUrl, question: { stem: question.stem, options: question.options, correctAnswer: question.correctAnswer, myAnswer: latestCause?.answer, personalCause: latestCause?.personalCause, module: question.module, topic: question.topic }, history });
+      const analysis = await requestDeepSeek<AiAnalysis>({ ...settings, action: 'analyze', imageDataUrls: questionImages(question).map(i=>i.dataUrl), question: { ...questionContext(question), imageRoles:questionImages(question).map(i=>i.role), stem: question.stem, options: question.options, correctAnswer: question.correctAnswer, myAnswer: latestCause?.answer, personalCause: latestCause?.personalCause, module: question.module, topic: question.topic }, history });
       const now = new Date().toISOString();
       const analysisMessage: QuestionMessage = { id: crypto.randomUUID(), role: 'assistant', content: `${analysis.summary}\n\n正确思路：${analysis.correctReasoning}\n\n避坑提醒：${analysis.pitfall}`, createdAt: now };
       const saved = await saveIfUnchanged({ ...question, analysis, analysisStale:false, conversation: [...(question.conversation || []), analysisMessage], conversationSummary: analysis.summary, updatedAt: now }, question.updatedAt); setMessage(saved ? '分析已保存到本地，也已加入本题会话。' : '题目已被修改，本次旧版本分析未覆盖新数据。'); onChanged();
@@ -494,7 +506,7 @@ function QuestionDetail({ question, questions, settings, onBack, onEdit, onChang
     setChatInput(''); setChatBusy(true); setMessage('');
     try {
       const shouldSendImage = Boolean(question.imageDataUrl && (!(question.conversation?.length) || /图|图片|图形|选项|细节/.test(prompt)));
-      const result = await requestDeepSeek<{ reply?: string; summary?: string }>({ ...settings, action: 'chat', imageDataUrl: shouldSendImage ? question.imageDataUrl : undefined, question: { stem: question.stem, options: question.options, correctAnswer: question.correctAnswer, answerSource: question.answerSource, module: question.module, topic: question.topic, tags: question.tags, personalCause: latestCause?.personalCause, conversationSummary: question.analysisStale ? undefined : question.conversationSummary, analysisStale:question.analysisStale }, history, messages: (question.analysisStale ? [userMessage] : conversation.slice(-10)).map(({ role, content }) => ({ role, content })) });
+      const result = await requestDeepSeek<{ reply?: string; summary?: string }>({ ...settings, action: 'chat', imageDataUrls: (question.material || shouldSendImage) ? questionImages(question).map(i=>i.dataUrl) : [], question: { ...questionContext(question), imageRoles:questionImages(question).map(i=>i.role), stem: question.stem, options: question.options, correctAnswer: question.correctAnswer, answerSource: question.answerSource, module: question.module, topic: question.topic, tags: question.tags, personalCause: latestCause?.personalCause, conversationSummary: question.analysisStale ? undefined : question.conversationSummary, analysisStale:question.analysisStale }, history, messages: (question.analysisStale ? [userMessage] : conversation.slice(-10)).map(({ role, content }) => ({ role, content })) });
       if (!result.reply) throw new Error('DeepSeek 没有返回有效回答');
       const assistantMessage: QuestionMessage = { id: crypto.randomUUID(), role: 'assistant', content: result.reply, createdAt: new Date().toISOString() };
       if (!await saveIfUnchanged({ ...question, conversation: [...conversation, assistantMessage], conversationSummary: result.summary || question.conversationSummary, updatedAt: assistantMessage.createdAt }, question.updatedAt)) setMessage('题目已被修改，本次回答未覆盖新数据。');
@@ -509,6 +521,7 @@ function QuestionDetail({ question, questions, settings, onBack, onEdit, onChang
   async function toggleMastered() { await saveQuestion({ ...question, status: question.status === 'mastered' ? 'learning' : 'mastered', updatedAt: new Date().toISOString() }); onChanged(); }
   async function remove() { if (!confirm('将这道题移入最近删除吗？可在待整理箱恢复。')) return; await deleteQuestion(question.id); onChanged(); onBack(); }
   return <><button onClick={onBack} className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="size-4" /> 返回</button><div className="mt-5 flex flex-wrap items-start justify-between gap-4"><div><div className="flex flex-wrap gap-2"><Badge variant="secondary">{question.module}</Badge><Badge variant="outline">{question.topic}</Badge>{question.isDemo && <Badge variant="outline">示例数据</Badge>}</div><h1 className="mt-3 max-w-4xl font-heading text-2xl font-semibold">错题详情</h1></div><div className="flex flex-wrap gap-2"><Button variant="outline" onClick={onEdit}><PencilLine /> 编辑</Button><Button variant="outline" onClick={toggleMastered}>{question.status === 'mastered' ? <RotateCcw /> : <Check />}{question.status === 'mastered' ? '恢复复习' : '标为掌握'}</Button><Button variant="destructive" onClick={remove}><Trash2 /> 删除</Button></div></div>
+    <div className="mt-4"><Button variant="outline" onClick={onMaterialSet}>{question.material ? '编辑共享资料 / 添加同资料小题' : '添加共享资料 / 扩展为资料题组'}</Button>{question.material && <p className="mt-2 text-sm">{question.material.title} · 小题 {question.subquestionNumber} · 共 {questions.filter(q=>q.material?.id===question.material?.id).length} 道</p>}</div><MaterialView material={question.material} />
     <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]"><section className="space-y-5"><div className="rounded-[22px] border bg-card p-5 sm:p-7"><div className="flex items-center justify-between text-xs text-muted-foreground"><span>{question.source}{!question.sourceVerified ? ' · 来源待核对' : ''}</span><span>已复刷 {Math.max(0, question.attempts.length - 1)} 次</span></div>{question.imageDataUrl && <>{/* oxlint-disable-next-line next/no-img-element -- 本地 data URL 不适合图片优化器 */}<img src={question.imageDataUrl} alt="题目原图" className="mt-5 max-h-[460px] w-full rounded-xl border bg-white object-contain" /></>}<p className="mt-5 whitespace-pre-wrap text-[16px] leading-8">{question.stem}</p><div className="mt-5 grid gap-3">{Object.entries(question.options).map(([key, value]) => <div key={key} className={`flex items-start gap-3 rounded-xl border px-4 py-3 ${key === question.correctAnswer ? 'border-[#77a084] bg-[#edf6ef]' : 'bg-card'}`}><span className="grid size-7 shrink-0 place-items-center rounded-full border text-sm font-semibold">{key}</span><span className="pt-0.5 text-sm leading-6">{value}</span></div>)}</div>{message && <p className="mt-4 rounded-xl bg-muted px-4 py-3 text-sm text-muted-foreground">{message}</p>}</div>
       <div className="rounded-[22px] border bg-card p-5 sm:p-7"><div className="grid gap-4 sm:grid-cols-2"><Info label="正确答案" value={question.correctAnswer} /><Info label="答案依据" value={question.answerSource === 'official' ? '官方答案' : question.answerSource === 'user' ? '用户确认' : 'AI推测，待确认'} /><Info label="首次错误" value={question.attempts[0]?.answer || '未记录'} /><Info label="个人错因" value={latestCause?.personalCause || latestCause?.causeType || '未填写'} /></div>{question.correctReasoning && <AnalysisItem title="正确答案解析" body={question.correctReasoning} />}{question.extraImages?.filter(i=>i.role==='analysis').map(i=><AnswerAnalysisImage key={i.id} src={i.dataUrl} />)}{question.answerAnalysisImageDataUrl && <AnswerAnalysisImage src={question.answerAnalysisImageDataUrl} />}{question.pitfall && <AnalysisItem title="我记录的避坑提醒" body={question.pitfall} />}</div>
       {question.analysisStale && <p className="rounded-xl bg-muted p-3 text-sm">题目或答案已修改，旧解析和会话结论需重新核对。</p>}{question.analysis && <AnalysisBlock analysis={question.analysis} />}
@@ -686,7 +699,7 @@ function Settings({ settings, setSettings, githubSync, setGithubSync, syncStatus
   </>;
 }
 
-function QuestionRow({ question, border, onClick, selected, onSelect }: { question: WrongQuestion; border: boolean; onClick: () => void; selected?: boolean; onSelect?: () => void }) { const last = question.attempts.at(-1); return <div className="relative flex"><span className={`w-2 shrink-0 ${question.module === '资料分析' ? 'bg-[#dc5f3d]' : question.module === '判断推理' ? 'bg-[#315a74]' : 'bg-[#a27b36]'}`} />{onSelect && <button aria-label={selected ? '取消选择这道题' : '选择这道题'} aria-pressed={selected} onClick={onSelect} className={`ml-4 mt-5 grid size-6 shrink-0 place-items-center rounded-md border transition-colors ${selected ? 'border-primary bg-primary text-primary-foreground' : 'bg-background text-transparent hover:border-primary/50'}`}><Check className="size-4" /></button>}<button className="group grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_auto] items-stretch text-left transition-colors hover:bg-muted/45" onClick={onClick}><span className={`min-w-0 px-5 py-5 sm:px-6 ${border ? 'border-b' : ''}`}><span className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{question.source}</span><span>收录于 {new Date(captureDate(question)).toLocaleString('zh-CN')}</span><span>·</span><span>{question.status === 'mastered' ? '已掌握' : `复习等级 ${question.reviewLevel}`}</span></span><span className="mt-2 block line-clamp-2 text-[15px] font-medium sm:text-base">{question.stem}</span><span className="mt-3 flex flex-wrap gap-2"><Badge variant="secondary">{question.module}</Badge><Badge variant="outline">{question.topic}</Badge>{last?.causeType && <Badge variant="outline" className="border-[#ebd3cc] bg-[#fff7f4] text-[#a64e37]">{last.causeType}</Badge>}</span></span><span className={`grid place-items-center px-4 text-muted-foreground ${border ? 'border-b' : ''}`}><ChevronRight className="size-5 transition-transform group-hover:translate-x-1" /></span></button></div>; }
+function QuestionRow({ question, border, onClick, selected, onSelect }: { question: WrongQuestion; border: boolean; onClick: () => void; selected?: boolean; onSelect?: () => void }) { const last = question.attempts.at(-1); return <div className="relative flex"><span className={`w-2 shrink-0 ${question.module === '资料分析' ? 'bg-[#dc5f3d]' : question.module === '判断推理' ? 'bg-[#315a74]' : 'bg-[#a27b36]'}`} />{onSelect && <button aria-label={selected ? '取消选择这道题' : '选择这道题'} aria-pressed={selected} onClick={onSelect} className={`ml-4 mt-5 grid size-6 shrink-0 place-items-center rounded-md border transition-colors ${selected ? 'border-primary bg-primary text-primary-foreground' : 'bg-background text-transparent hover:border-primary/50'}`}><Check className="size-4" /></button>}<button className="group grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_auto] items-stretch text-left transition-colors hover:bg-muted/45" onClick={onClick}><span className={`min-w-0 px-5 py-5 sm:px-6 ${border ? 'border-b' : ''}`}><span className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{question.source}</span>{question.material && <span>{question.material.title} · 小题 {question.subquestionNumber}</span>}<span>收录于 {new Date(captureDate(question)).toLocaleString('zh-CN')}</span><span>·</span><span>{question.status === 'mastered' ? '已掌握' : `复习等级 ${question.reviewLevel}`}</span></span><span className="mt-2 block line-clamp-2 text-[15px] font-medium sm:text-base">{question.stem}</span><span className="mt-3 flex flex-wrap gap-2"><Badge variant="secondary">{question.module}</Badge><Badge variant="outline">{question.topic}</Badge>{last?.causeType && <Badge variant="outline" className="border-[#ebd3cc] bg-[#fff7f4] text-[#a64e37]">{last.causeType}</Badge>}</span></span><span className={`grid place-items-center px-4 text-muted-foreground ${border ? 'border-b' : ''}`}><ChevronRight className="size-5 transition-transform group-hover:translate-x-1" /></span></button></div>; }
 
 function PageHeader({ eyebrow, title, description, compact = false }: { eyebrow: string; title: string; description: string; compact?: boolean }) { return <header className={compact ? 'mt-5' : ''}><p className="text-xs font-semibold tracking-[.16em] text-[#a85b3d]">{eyebrow}</p><h1 className="mt-1 font-heading text-3xl font-semibold tracking-tight">{title}</h1><p className="mt-2 text-sm text-muted-foreground">{description}</p></header>; }
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) { return <label className="block"><span className="mb-2 flex items-center justify-between text-sm font-medium"><span>{label}</span>{hint && <span className="text-[11px] font-normal text-muted-foreground">{hint}</span>}</span>{children}</label>; }
