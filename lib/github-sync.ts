@@ -1,4 +1,5 @@
 import type { GithubSyncSettings, WrongQuestion } from './models';
+import { validateBackup } from './backup';
 
 const INDEX_PATH = 'data/index.json';
 const LAST_HASHES_KEY = 'cuojian_sync_hashes';
@@ -132,20 +133,28 @@ async function downloadQuestion(settings: GithubSyncSettings, entry: SyncEntry) 
   const file = await getFile(settings, entry.path);
   if (!file?.content) throw new Error(`云端题目文件缺失：${entry.path}`);
   const envelope = JSON.parse(decodeText(file.content)) as EncryptedEnvelope;
-  return decryptJson<WrongQuestion>(envelope, settings.passphrase);
+  const question = await decryptJson<WrongQuestion>(envelope, settings.passphrase);
+  return validateBackup({ questions:[question] })[0];
 }
 
 async function getFile(settings: GithubSyncSettings, path: string, allowMissing = false): Promise<GithubFile | undefined> {
-  const response = await fetch(apiUrl(settings, path, true), { headers: githubHeaders(settings.token) });
+  const response = await fetch(apiUrl(settings, path, true), { headers: {...githubHeaders(settings.token),Accept:'application/vnd.github.object+json'}, signal:AbortSignal.timeout(60000) });
   if (allowMissing && response.status === 404) return undefined;
   if (!response.ok) throw new Error(await githubError(response));
-  return response.json() as Promise<GithubFile>;
+  const file = await response.json() as GithubFile;
+  if (!file.content && file.encoding === 'none') {
+    const raw = await fetch(apiUrl(settings,path,true),{ headers:{...githubHeaders(settings.token),Accept:'application/vnd.github.raw+json'}, signal:AbortSignal.timeout(60000) });
+    if(!raw.ok) throw new Error(await githubError(raw));
+    return {...file,content:encodeText(await raw.text()),encoding:'base64'};
+  }
+  return file;
 }
 
 async function putFile(settings: GithubSyncSettings, path: string, text: string, sha: string | undefined, message: string) {
   const response = await fetch(apiUrl(settings, path, false), {
     method: 'PUT', headers: githubHeaders(settings.token),
     body: JSON.stringify({ message, content: encodeText(text), branch: settings.branch, ...(sha ? { sha } : {}) }),
+    signal:AbortSignal.timeout(120000),
   });
   if (!response.ok) throw new Error(await githubError(response));
   const body = await response.json() as { content?: { sha?: string } };
