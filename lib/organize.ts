@@ -14,6 +14,7 @@ export function validateOrganized(value: unknown) {
 
 const inFlight = new Set<string>();
 export async function organizeOne(q: WrongQuestion, settings: AiSettings) {
+  if(q.captureGroupId && !q.material) throw new Error('请先核对整套资料与小题，再进行AI整理');
   if (inFlight.has(q.id)) return false;
   inFlight.add(q.id);
   try {

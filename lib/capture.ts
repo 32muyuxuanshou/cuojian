@@ -2,9 +2,9 @@ import { registerPlugin } from '@capacitor/core';
 import type { WrongQuestion } from './models';
 
 export const NativeCapture = registerPlugin<{
-  start(): Promise<void>;
+  start(options?: {group?:boolean}): Promise<void>;
   stop(): Promise<void>;
-  pending(): Promise<{ images: Array<{ id: string; dataUrl: string; capturedAt: string }> }>;
+  pending(): Promise<{ collectingGroup?:string; images: Array<{ id: string; dataUrl: string; capturedAt: string; groupId?:string; role?:'material'|'question'; questionId?:string }> }>;
   acknowledge(options: { ids: string[] }): Promise<void>;
 }>('NativeCapture');
 

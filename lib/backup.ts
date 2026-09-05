@@ -6,6 +6,7 @@ export function validateBackup(value: unknown): WrongQuestion[] {
   for(const q of records) {
     if (!q || typeof q.id!=='string' || !q.id || ids.has(q.id)) throw new Error('题目ID缺失或重复');
     ids.add(q.id);
+    if((q.captureGroupId!==undefined && typeof q.captureGroupId!=='string') || (q.captureQuestionId!==undefined && typeof q.captureQuestionId!=='string') || (q.captureRole!==undefined && !['material','question'].includes(q.captureRole)))throw new Error('连续收题分组格式错误');
     if(q.material && (typeof q.material.id!=='string' || !q.material.id || typeof q.material.title!=='string' || typeof q.material.text!=='string' || !Number.isFinite(Date.parse(q.material.updatedAt)) || !Array.isArray(q.material.images) || !q.material.images.every(src=>typeof src==='string' && src.startsWith('data:image/')))) throw new Error('共享资料格式错误');
     for(const key of ['createdAt','updatedAt','nextReviewAt'] as const) if(!Number.isFinite(Date.parse(q[key]))) throw new Error('日期格式错误');
     for(const key of ['source','stem','module','topic','correctAnswer'] as const) if(typeof q[key]!=='string') throw new Error('题目字段不完整');

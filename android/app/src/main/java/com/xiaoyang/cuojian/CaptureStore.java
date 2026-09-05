@@ -9,9 +9,17 @@ import java.util.*;
 final class CaptureStore {
     static File directory(Context context) { File dir=new File(context.getFilesDir(), "capture-inbox"); dir.mkdirs(); return dir; }
     static synchronized String save(Context context, Bitmap bitmap) throws IOException {
+        return save(context,bitmap,null,null,null);
+    }
+    static synchronized String save(Context context, Bitmap bitmap,String group,String role,String question) throws IOException {
         String id=UUID.randomUUID().toString();
         File temp=new File(directory(context),id+".tmp");
         try(FileOutputStream out=new FileOutputStream(temp)) { if(!bitmap.compress(Bitmap.CompressFormat.PNG,100,out)) throw new IOException("图片保存失败"); out.getFD().sync(); }
+        // Commit metadata first; .png is the ready marker observed by the bridge.
+        if(group!=null)try {
+            org.json.JSONObject meta=new org.json.JSONObject();meta.put("groupId",group);meta.put("role",role);meta.put("questionId",question);
+            try(FileOutputStream out=new FileOutputStream(new File(directory(context),id+".json"))){out.write(meta.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));out.getFD().sync();}
+        }catch(org.json.JSONException e){throw new IOException(e);}
         if(!temp.renameTo(new File(directory(context),id+".png"))) throw new IOException("图片保存失败");
         return id;
     }

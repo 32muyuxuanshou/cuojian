@@ -35,6 +35,9 @@ export interface WrongQuestion {
   id: string;
   material?: SharedMaterial;
   subquestionNumber?: string;
+  captureGroupId?: string;
+  captureRole?: 'material' | 'question';
+  captureQuestionId?: string;
   capturedAt?: string;
   organizedAt?: string;
   deletedAt?: string;
