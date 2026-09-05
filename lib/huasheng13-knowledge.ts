@@ -7,6 +7,8 @@
  * 时效性常识和大段示例，避免把经验判断误当作答案依据。
  */
 
+import documents from './huasheng13-documents.json';
+
 export const huasheng13Source = {
   repository: 'https://github.com/WangJunqing-coder/huasheng13-skill',
   revision: '6a43d776741f69a231eb2d75f9d5d59efe870659',
@@ -66,5 +68,9 @@ const topicKnowledge: Record<string, string> = {
 export function getHuasheng13Knowledge(module?: string, topic?: string) {
   const moduleText = module ? moduleKnowledge[module] : undefined;
   const topicText = topic ? topicKnowledge[topic] : undefined;
-  return [moduleText, topicText].filter(Boolean).join('\n');
+  const prefix: Record<string,string> = { 资料分析:'ziliao-', 数量关系:'shuliang-', 言语理解:'yanyu-', 判断推理:'panduan-', 申论:'shenlun', 常识判断:'changshi-' };
+  const terms = [topic || '', ...(topic || '').match(/.{2}/g) || []].filter(Boolean);
+  const chunks = documents.filter(d => prefix[module || ''] && d.path.includes(prefix[module!])).flatMap(d => d.text.split(/\n(?=##? )/).map((text,index) => ({ path:d.path, index, text:text.slice(0,3500), score:terms.reduce((n,t)=>n+(text.includes(t)?t.length:0),0) })));
+  const matches = chunks.sort((a,b)=>b.score-a.score || a.index-b.index).slice(0,3).map(c=>`[${c.path}#片段${c.index+1} @ ${huasheng13Source.revision.slice(0,7)}]\n${c.text}`);
+  return [moduleText,topicText,...matches].filter(Boolean).join('\n');
 }

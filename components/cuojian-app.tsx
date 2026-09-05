@@ -11,7 +11,10 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
 import { Textarea } from '@/components/ui/textarea';
-import { DATA_CHANGED_EVENT, deleteQuestion, listQuestions, replaceAllQuestions, saveQuestion, seedQuestions } from '@/lib/local-db';
+import { DATA_CHANGED_EVENT, applySyncResults, restoreBeforeImport, saveIfUnchanged, trashQuestions, deleteQuestion, listQuestions, replaceAllQuestions, saveQuestion, seedQuestions } from '@/lib/local-db';
+import { validateBackup, mergeBackup } from '@/lib/backup';
+import { Inbox } from '@/components/inbox';
+import { matchesDate, captureDate } from '@/lib/capture';
 import { DEEPSEEK_MODEL } from '@/lib/deepseek-client-config';
 import { requestDeepSeek } from '@/lib/deepseek-client';
 import { diagnoseWeaknesses } from '@/lib/learning-diagnosis';
@@ -20,7 +23,7 @@ import { topicTaxonomy } from '@/lib/gongkao-skill';
 import { APP_VERSION, checkForUpdate, installUpdate, type AvailableUpdate } from '@/lib/app-update';
 import { listSyncConflicts, resolveSyncConflict, syncWithGithub } from '@/lib/github-sync';
 
-type View = 'dashboard' | 'library' | 'add' | 'edit' | 'stats' | 'settings' | 'detail' | 'practice' | 'review';
+type View = 'dashboard' | 'library' | 'inbox' | 'add' | 'edit' | 'stats' | 'settings' | 'detail' | 'practice' | 'review';
 type ClassificationResult = {
   stem?: string;
   detectedSource?: string;
@@ -70,12 +73,13 @@ export function CuojianApp() {
       if (manual) setSyncStatus({ state: 'disabled', message: '请先完整填写仓库、令牌和至少 8 位的加密口令。' });
       return;
     }
-    if (syncBusy.current) return;
+    if (syncBusy.current) { if (syncTimer.current) clearTimeout(syncTimer.current); syncTimer.current = setTimeout(() => void performSync(value, manual), 8000); return; }
     syncBusy.current = true;
     setSyncStatus({ state: 'syncing', message: manual ? '正在手动同步…' : '正在后台同步…' });
     try {
-      const result = await syncWithGithub(await listQuestions(), value);
-      await replaceAllQuestions(result.questions, false);
+      const before = await listQuestions(true);
+      const result = await syncWithGithub(before, value);
+      await applySyncResults(before, result.questions);
       await refresh();
       setSyncStatus({
         state: result.conflicts ? 'conflict' : 'success',
@@ -136,7 +140,7 @@ export function CuojianApp() {
 
   useEffect(() => {
     function scheduleSync() {
-      if (!githubSync.autoSync || !syncReady(githubSync) || syncBusy.current) return;
+      if (!githubSync.autoSync || !syncReady(githubSync)) return;
       if (syncTimer.current) clearTimeout(syncTimer.current);
       syncTimer.current = setTimeout(() => void performSync(githubSync), 8_000);
     }
@@ -152,7 +156,8 @@ export function CuojianApp() {
     };
   }, [githubSync]);
 
-  const due = useMemo(() => questions.filter((q) => q.status !== 'mastered' && new Date(q.nextReviewAt) <= new Date()), [questions]);
+  const archived = questions.filter(q => !q.inbox);
+  const due = useMemo(() => questions.filter((q) => !q.inbox && q.answerConfirmed !== false && !!q.correctAnswer && q.status !== 'mastered' && new Date(q.nextReviewAt) <= new Date()), [questions]);
   const selected = questions.find((q) => q.id === selectedId);
   const attempts = questions.flatMap((q) => q.attempts);
   const correctAttempts = attempts.filter((a) => a.correct).length;
@@ -160,7 +165,7 @@ export function CuojianApp() {
 
   function navigate(next: View) { setView(next); if (next !== 'detail' && next !== 'edit') setSelectedId(undefined); }
   function openQuestion(id: string) { setSelectedId(id); setView('detail'); }
-  function startSession(mode: 'practice' | 'review', selectedQuestions: WrongQuestion[], isToday = false) { setSessionQuestions(selectedQuestions); setSessionIsToday(isToday); setView(mode); setSelectedId(undefined); }
+  function startSession(mode: 'practice' | 'review', selectedQuestions: WrongQuestion[], isToday = false) { const ready = selectedQuestions.filter(q => !q.inbox && q.answerConfirmed !== false && !!q.correctAnswer); if (ready.length !== selectedQuestions.length) window.alert('答案未确认的题目暂不参与计分练习，请先补充确认。'); if (!ready.length) return; setSessionQuestions(ready); setSessionIsToday(isToday); setView(mode); setSelectedId(undefined); }
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -170,9 +175,11 @@ export function CuojianApp() {
           {loading ? <LoadingState /> : view === 'dashboard' ? (
             <Dashboard questions={questions} due={due} correctAttempts={correctAttempts} mastery={mastery} onAdd={() => navigate('add')} onSearch={() => navigate('library')} onOpen={openQuestion} onStartPractice={() => startSession('practice', due, true)} onStartReview={() => startSession('review', due, true)} />
           ) : view === 'library' ? (
-            <Library questions={questions} search={search} setSearch={setSearch} onOpen={openQuestion} onStart={startSession} />
+            <Library questions={archived} search={search} setSearch={setSearch} onOpen={openQuestion} onStart={startSession} onChanged={refresh} onInbox={() => navigate('inbox')} />
+          ) : view === 'inbox' ? (
+            <Inbox questions={questions} settings={settings} onChanged={refresh} onEdit={id => { setSelectedId(id); setView('edit'); }} onStart={startSession} />
           ) : view === 'add' || (view === 'edit' && selected) ? (
-            <AddQuestion settings={settings} initialQuestion={view === 'edit' ? selected : undefined} onCancel={() => navigate(view === 'edit' ? 'detail' : 'dashboard')} onSaved={async () => { await refresh(); navigate(view === 'edit' ? 'detail' : 'library'); }} />
+            <><div className="mb-4"><Button variant="outline" onClick={()=>navigate('inbox')}>截图快速收录 / 待整理箱</Button></div><AddQuestion settings={settings} initialQuestion={view === 'edit' ? selected : undefined} onCancel={() => navigate(view === 'edit' ? 'detail' : 'dashboard')} onSaved={async (q) => { await refresh(); navigate(q.inbox ? 'inbox' : view === 'edit' ? 'detail' : 'library'); }} /></>
           ) : view === 'stats' ? (
             <Stats questions={questions} settings={settings} onOpen={openQuestion} onStart={startSession} />
           ) : view === 'settings' ? (
@@ -199,6 +206,7 @@ function Sidebar({ view, counts, navigate }: { view: View; counts: { due: number
       <NavItem icon={CalendarDays} label="今日复习" active={view === 'dashboard' || view === 'review' || view === 'practice'} count={`${counts.due}`} onClick={() => navigate('dashboard')} />
       <NavItem icon={Archive} label="错题库" active={view === 'library' || view === 'detail' || view === 'edit'} count={`${counts.all}`} onClick={() => navigate('library')} />
       <NavItem icon={CirclePlus} label="录入错题" active={view === 'add'} onClick={() => navigate('add')} />
+      <NavItem icon={FileImage} label="待整理箱 / 悬浮收题" active={view === 'inbox'} onClick={() => navigate('inbox')} />
       <NavItem icon={Target} label="学习统计" active={view === 'stats'} onClick={() => navigate('stats')} />
     </nav>
     <div className="mt-auto space-y-2">
@@ -223,12 +231,23 @@ function Dashboard({ questions, due, correctAttempts, mastery, onAdd, onSearch, 
 
 type FilterGroup = 'sources' | 'modules' | 'topics' | 'causes' | 'tags';
 
-function Library({ questions, search, setSearch, onOpen, onStart }: { questions: WrongQuestion[]; search: string; setSearch: (v: string) => void; onOpen: (id: string) => void; onStart: (mode: 'practice' | 'review', questions: WrongQuestion[]) => void }) {
+function Library({ questions, search, setSearch, onOpen, onStart, onChanged, onInbox }: { questions: WrongQuestion[]; search: string; setSearch: (v: string) => void; onOpen: (id: string) => void; onStart: (mode: 'practice' | 'review', questions: WrongQuestion[]) => void; onChanged: () => Promise<void>; onInbox: () => void }) {
   const [filters, setFilters] = useState<Record<FilterGroup, string[]>>({ sources: [], modules: [], topics: [], causes: [], tags: [] });
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [period, setPeriod] = useState('all');
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const [sort, setSort] = useState('captured-desc');
+  const [deleting, setDeleting] = useState(false);
+  async function removeSelected() {
+    const ids = selectedIds.filter(id => questions.some(q => q.id === id));
+    if (deleting || !confirm(`将选中的 ${ids.length} 道题移入最近删除？可在待整理箱恢复。`)) return;
+    setDeleting(true);
+    try { await trashQuestions(ids); setSelectedIds([]); await onChanged(); } catch { alert('删除失败，数据未确认删除，请重试。'); } finally { setDeleting(false); }
+  }
   const facets = {
     sources: unique(questions.map((q) => q.source)),
-    modules: modules.slice(1).filter((value) => questions.some((q) => q.module === value)),
+    modules: unique(questions.map(q => q.module)),
     topics: unique(questions.map((q) => q.topic)),
     causes: unique(questions.flatMap((q) => q.attempts.map((a) => a.causeType).filter(Boolean) as string[])),
     tags: unique(questions.flatMap((q) => q.tags)),
@@ -246,28 +265,29 @@ function Library({ questions, search, setSearch, onOpen, onStart }: { questions:
   const filtered = questions.filter((q) => {
     const haystack = [q.stem, q.source, q.module, q.topic, ...q.tags, ...q.attempts.map((a) => `${a.causeType} ${a.personalCause}`)].join(' ').toLowerCase();
     const causes = q.attempts.map((a) => a.causeType).filter(Boolean) as string[];
-    return haystack.includes(search.trim().toLowerCase())
+    return matchesDate(q, period, from, to) && haystack.includes(search.trim().toLowerCase())
       && (!activeFilters.sources.length || activeFilters.sources.includes(q.source))
       && (!activeFilters.modules.length || activeFilters.modules.includes(q.module))
       && (!activeFilters.topics.length || activeFilters.topics.includes(q.topic))
       && (!activeFilters.causes.length || activeFilters.causes.some((value) => causes.includes(value)))
       && (!activeFilters.tags.length || activeFilters.tags.some((value) => q.tags.includes(value)));
-  });
+  }).sort((a, b) => sort === 'updated' ? b.updatedAt.localeCompare(a.updatedAt) : sort === 'captured-asc' ? captureDate(a).localeCompare(captureDate(b)) : captureDate(b).localeCompare(captureDate(a)));
   const allFilteredSelected = filtered.length > 0 && filtered.every((q) => selectedIds.includes(q.id));
   const allQuestionsSelected = questions.length > 0 && questions.every((q) => selectedIds.includes(q.id));
   const toggleFilteredSelection = () => setSelectedIds((previous) => allFilteredSelected ? previous.filter((id) => !filtered.some((q) => q.id === id)) : unique([...previous, ...filtered.map((q) => q.id)]));
   const toggleAllSelection = () => setSelectedIds(allQuestionsSelected ? [] : questions.map((q) => q.id));
   return <><PageHeader eyebrow="本地资料库" title="错题库" description="同组标签可多选，不同分组会组合筛选。" />
+    <div className="mt-4 flex flex-wrap gap-2"><Button onClick={onInbox}><FileImage /> 待整理箱 · 悬浮收题 · 最近删除</Button><select aria-label="收录时间" className={selectClass + ' !w-auto'} value={period} onChange={e => setPeriod(e.target.value)}>{[['all','全部收录时间'],['today','今天收录'],['yesterday','昨天收录'],['7','近7天'],['30','近30天'],['custom','自定义日期']].map(([v,l]) => <option key={v} value={v}>{l}</option>)}</select>{period === 'custom' && <><Input aria-label="开始日期" type="date" className="w-auto" value={from} onChange={e => setFrom(e.target.value)} /><Input aria-label="结束日期" type="date" className="w-auto" value={to} onChange={e => setTo(e.target.value)} /></>}<select aria-label="排序" className={selectClass + ' !w-auto'} value={sort} onChange={e => setSort(e.target.value)}><option value="captured-desc">最近收录优先</option><option value="captured-asc">最早收录优先</option><option value="updated">最近更新优先</option></select>{selectedIds.length > 0 && <Button variant="outline" disabled={deleting} onClick={removeSelected}><Trash2 /> 批量删除 {selectedIds.length} 道</Button>}</div>
     <div className="mt-7 flex flex-col gap-3"><div className="relative"><Search className="absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input value={search} onChange={(e) => setSearch(e.target.value)} className="h-12 rounded-xl bg-card pl-10" placeholder="搜索题干、标签、来源或个人错因" />{search && <button aria-label="清空搜索" className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground" onClick={() => setSearch('')}><X className="size-4" /></button>}</div>
       <div className="space-y-3 rounded-[18px] border bg-card p-4">{([['sources', '来源'], ['modules', '模块'], ['topics', '考点'], ['causes', '错因'], ['tags', '标签']] as const).map(([group, label]) => facets[group].length > 0 && <div key={group} className="grid gap-2 sm:grid-cols-[52px_minmax(0,1fr)]"><span className="pt-1.5 text-xs font-semibold text-[#a85b3d]">{label}</span><div className="flex flex-wrap gap-2">{facets[group].map((value) => <button key={value} onClick={() => toggle(group, value)} aria-pressed={filters[group].includes(value)} className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${filters[group].includes(value) ? 'border-primary bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:border-primary/35 hover:text-foreground'}`}>{value}</button>)}</div></div>)}{selectedCount > 0 && <button className="text-xs text-muted-foreground underline underline-offset-4" onClick={() => setFilters({ sources: [], modules: [], topics: [], causes: [], tags: [] })}>清除全部 {selectedCount} 个筛选</button>}</div></div>
-    <div className="mt-5 flex flex-wrap items-center justify-between gap-3 text-sm"><span className="text-muted-foreground">找到 {filtered.length} 道 · 已选 {selectedIds.length} 道</span><div className="flex flex-wrap items-center gap-3"><button disabled={!filtered.length} aria-pressed={allFilteredSelected} className="flex items-center gap-1.5 text-xs font-medium text-primary disabled:opacity-40" onClick={toggleFilteredSelection}><span className={`grid size-4 place-items-center rounded border ${allFilteredSelected ? 'border-primary bg-primary text-primary-foreground' : 'bg-card'}`}>{allFilteredSelected && <Check className="size-3" />}</span>{allFilteredSelected ? '取消当前全选' : '全选当前结果'}</button><button aria-pressed={allQuestionsSelected} className="text-xs font-medium text-primary" onClick={toggleAllSelection}>{allQuestionsSelected ? '取消全部' : `全选全部 ${questions.length} 道`}</button><span className="flex items-center gap-1 text-xs text-muted-foreground"><Filter className="size-3.5" /> 最近更新优先</span></div></div>
+    <div className="mt-5 flex flex-wrap items-center justify-between gap-3 text-sm"><span className="text-muted-foreground">找到 {filtered.length} 道 · 已选 {selectedIds.length} 道</span><div className="flex flex-wrap items-center gap-3"><button disabled={!filtered.length} aria-pressed={allFilteredSelected} className="flex items-center gap-1.5 text-xs font-medium text-primary disabled:opacity-40" onClick={toggleFilteredSelection}><span className={`grid size-4 place-items-center rounded border ${allFilteredSelected ? 'border-primary bg-primary text-primary-foreground' : 'bg-card'}`}>{allFilteredSelected && <Check className="size-3" />}</span>{allFilteredSelected ? '取消当前全选' : '全选当前结果'}</button><button aria-pressed={allQuestionsSelected} className="text-xs font-medium text-primary" onClick={toggleAllSelection}>{allQuestionsSelected ? '取消全部' : `全选全部 ${questions.length} 道`}</button><span className="flex items-center gap-1 text-xs text-muted-foreground"><Filter className="size-3.5" /> 按所选顺序</span></div></div>
     {selectedIds.length > 0 && <div className="mt-3 flex flex-wrap items-center gap-3 rounded-[18px] border border-primary/20 bg-[#eef2f0] p-3"><span className="mr-auto text-sm font-medium">用已选的 {selectedIds.length} 道题创建练习</span><Button variant="outline" size="sm" onClick={() => onStart('review', questions.filter((q) => selectedIds.includes(q.id)))}><BookOpenCheck /> 复习模式</Button><Button size="sm" onClick={() => onStart('practice', questions.filter((q) => selectedIds.includes(q.id)))}><Check /> 写题模式</Button><button aria-label="清空选题" className="p-1 text-muted-foreground" onClick={() => setSelectedIds([])}><X className="size-4" /></button></div>}
     {filtered.length ? <div className="mt-3 overflow-hidden rounded-[22px] border bg-card">{filtered.map((q, index) => <QuestionRow key={q.id} question={q} border={index !== filtered.length - 1} onClick={() => onOpen(q.id)} selected={selectedIds.includes(q.id)} onSelect={() => toggleQuestion(q.id)} />)}</div> : <Empty title="没有匹配的错题" body="换一个关键词或模块试试。" />}</>;
 }
 
-function AddQuestion({ settings, initialQuestion, onCancel, onSaved }: { settings: AiSettings; initialQuestion?: WrongQuestion; onCancel: () => void; onSaved: () => void }) {
+function AddQuestion({ settings, initialQuestion, onCancel, onSaved }: { settings: AiSettings; initialQuestion?: WrongQuestion; onCancel: () => void; onSaved: (q:WrongQuestion) => void }) {
   const firstAttempt = initialQuestion?.attempts[0];
-  const [form, setForm] = useState(() => ({ source: initialQuestion?.source || '', sourceVerified: initialQuestion?.sourceVerified || false, stem: initialQuestion?.stem || '', A: initialQuestion?.options.A || '', B: initialQuestion?.options.B || '', C: initialQuestion?.options.C || '', D: initialQuestion?.options.D || '', myAnswer: firstAttempt?.answer || '', correctAnswer: initialQuestion?.correctAnswer || '', module: initialQuestion?.module || '判断推理', topic: initialQuestion?.topic || '定义判断', tags: initialQuestion?.tags.join('、') || '', causeType: firstAttempt?.causeType || '知识盲区', personalCause: firstAttempt?.personalCause || '', correctReasoning: initialQuestion?.correctReasoning || '', pitfall: initialQuestion?.pitfall || '' }));
+  const [form, setForm] = useState(() => ({ source: initialQuestion?.source || '', sourceVerified: initialQuestion?.sourceVerified || false, stem: initialQuestion?.stem || '', A: initialQuestion?.options.A || '', B: initialQuestion?.options.B || '', C: initialQuestion?.options.C || '', D: initialQuestion?.options.D || '', myAnswer: firstAttempt?.answer || '', correctAnswer: initialQuestion?.correctAnswer || '', module: initialQuestion?.module || '', topic: initialQuestion?.topic || '', tags: initialQuestion?.tags.join('、') || '', causeType: firstAttempt?.causeType || '', personalCause: firstAttempt?.personalCause || '', correctReasoning: initialQuestion?.correctReasoning || '', pitfall: initialQuestion?.pitfall || '' }));
   const [image, setImage] = useState<string | undefined>(initialQuestion?.imageDataUrl);
   const [answerAnalysisImage, setAnswerAnalysisImage] = useState<string | undefined>(initialQuestion?.answerAnalysisImageDataUrl);
   const [analysisDraft, setAnalysisDraft] = useState<AiAnalysis | undefined>(initialQuestion?.analysis);
@@ -310,7 +330,7 @@ function AddQuestion({ settings, initialQuestion, onCancel, onSaved }: { setting
     setBusy(true); setMessage('');
     try {
       const options = Object.fromEntries((['A', 'B', 'C', 'D'] as const).filter((key) => form[key]).map((key) => [key, form[key]]));
-      const result = await requestDeepSeek<AiAnalysis>({ ...settings, action: 'analyze', imageDataUrls: [image, answerAnalysisImage], question: { stem: form.stem, options, correctAnswer: form.correctAnswer, myAnswer: form.myAnswer, personalCause: form.personalCause, module: form.module, topic: form.topic, imageOrder: answerAnalysisImage ? '第一张是题目原图，第二张是用户提供的官方解析参考；核对参考但不要盲从。' : '图片为题目原图。' }, history: [] });
+      const result = await requestDeepSeek<AiAnalysis>({ ...settings, action: 'analyze', imageDataUrls: [image, answerAnalysisImage], question: { stem: form.stem, options, correctAnswer: form.correctAnswer, myAnswer: form.myAnswer, personalCause: form.personalCause, module: form.module, topic: form.topic, imageOrder: answerAnalysisImage ? '第一张是题目原图，第二张是用户提供的解析参考（来源未验证）；核对参考但不要盲从。' : '图片为题目原图。' }, history: [] });
       setAnalysisDraft(result);
       setForm((previous) => ({ ...previous, correctReasoning: result.correctReasoning || previous.correctReasoning, pitfall: result.pitfall || previous.pitfall }));
       setMessage('AI解析草稿已填入，请核对和修改后再保存。');
@@ -318,16 +338,16 @@ function AddQuestion({ settings, initialQuestion, onCancel, onSaved }: { setting
     finally { setBusy(false); }
   }
   async function submit() {
-    if (!form.stem.trim() || !form.correctAnswer || !form.myAnswer) { setMessage('请至少填写题干、我的选项和正确答案。'); return; }
+    if (!form.stem.trim() && !image) { setMessage('请填写题干或上传图片；答案可以暂时留空。'); return; }
     const now = new Date().toISOString();
     const attempts = initialQuestion?.attempts.length
       ? initialQuestion.attempts.map((attempt, index) => {
           const answer = index === 0 ? form.myAnswer : attempt.answer;
-          return { ...attempt, answer, correct: answer === form.correctAnswer, ...(index === 0 ? { causeType: form.causeType, personalCause: form.personalCause.trim() } : {}) };
+          return index === 0 && attempt.mode === 'initial' ? { ...attempt, answer, correct: !!form.correctAnswer && answer === form.correctAnswer, causeType: form.causeType, personalCause: form.personalCause.trim() } : attempt;
         })
-      : [{ id: crypto.randomUUID(), answeredAt: now, answer: form.myAnswer, correct: form.myAnswer === form.correctAnswer, mode: 'initial' as const, causeType: form.causeType, personalCause: form.personalCause.trim() }];
+      : [{ id: crypto.randomUUID(), answeredAt: now, answer: form.myAnswer, correct: !!form.correctAnswer && form.myAnswer === form.correctAnswer, mode: 'initial' as const, causeType: form.causeType, personalCause: form.personalCause.trim() }];
     const answerKeyChanged = Boolean(initialQuestion && initialQuestion.correctAnswer !== form.correctAnswer);
-    const coreContentChanged = Boolean(initialQuestion && (initialQuestion.stem !== form.stem.trim() || initialQuestion.correctAnswer !== form.correctAnswer || ['A', 'B', 'C', 'D'].some((key) => (initialQuestion.options[key] || '') !== form[key as 'A' | 'B' | 'C' | 'D'])));
+    const coreContentChanged = Boolean(initialQuestion && (initialQuestion.imageDataUrl !== image || initialQuestion.answerAnalysisImageDataUrl !== answerAnalysisImage || initialQuestion.stem !== form.stem.trim() || initialQuestion.correctAnswer !== form.correctAnswer || ['A', 'B', 'C', 'D'].some((key) => (initialQuestion.options[key] || '') !== form[key as 'A' | 'B' | 'C' | 'D'])));
     const question: WrongQuestion = {
       ...initialQuestion,
       id: initialQuestion?.id || crypto.randomUUID(), createdAt: initialQuestion?.createdAt || now, updatedAt: now, source: form.source.trim() || '未填写来源', sourceVerified: form.sourceVerified, stem: form.stem.trim(),
@@ -335,9 +355,14 @@ function AddQuestion({ settings, initialQuestion, onCancel, onSaved }: { setting
       correctAnswer: form.correctAnswer, answerSource: 'user', module: form.module, topic: form.topic, tags: form.tags.split(/[、,，]/).map((t) => t.trim()).filter(Boolean), imageDataUrl: image,
       status: answerKeyChanged ? 'learning' : initialQuestion?.status || 'learning', reviewLevel: answerKeyChanged ? 0 : initialQuestion?.reviewLevel || 0, nextReviewAt: answerKeyChanged ? now : initialQuestion?.nextReviewAt || now,
       correctReasoning: form.correctReasoning.trim() || undefined, answerAnalysisImageDataUrl: answerAnalysisImage, pitfall: form.pitfall.trim() || undefined, analysis: coreContentChanged && analysisDraft === initialQuestion?.analysis ? undefined : analysisDraft,
-      attempts,
+      capturedAt: initialQuestion?.capturedAt || initialQuestion?.createdAt || now,
+      organizedAt: form.correctAnswer ? initialQuestion?.organizedAt || now : undefined,
+      inbox: !form.correctAnswer, answerConfirmed: !!form.correctAnswer,
+      organizeState: form.correctAnswer ? 'done' : 'pending',
+      analysisStale: coreContentChanged || initialQuestion?.analysisStale,
+      attempts: form.myAnswer ? attempts : initialQuestion?.attempts || [],
     };
-    await saveQuestion(question); onSaved();
+    try { await saveQuestion(question); onSaved(question); } catch { setMessage('保存失败，请检查剩余空间后重试。'); }
   }
   return <><button onClick={onCancel} className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="size-4" /> 返回</button><PageHeader eyebrow={initialQuestion ? '修正档案' : '快速收录'} title={initialQuestion ? '编辑这道错题' : '录入一道错题'} description={initialQuestion ? '修改录入错误；原有复刷历史会保留。' : '先保存事实，详细讲解可以稍后再生成。'} compact />
     <div className="mt-7 grid gap-6 xl:grid-cols-[minmax(320px,.85fr)_minmax(0,1.15fr)]"><section className="rounded-[22px] border bg-card p-5"><h2 className="font-heading text-lg font-semibold">题目图片</h2><p className="mt-1 text-xs text-muted-foreground">图形、表格题请保留原图，建议先裁剪无关区域。</p><input aria-label="选择题目图片" ref={fileRef} hidden type="file" accept="image/*" onChange={(e) => void pickImage(e.target.files?.[0])} />
@@ -346,14 +371,16 @@ function AddQuestion({ settings, initialQuestion, onCancel, onSaved }: { setting
       <section className="space-y-5 rounded-[22px] border bg-card p-5 sm:p-6"><Field label="来源" hint="DeepSeek 只能提供候选"><Input value={form.source} onChange={(e) => { update('source', e.target.value); setForm((prev) => ({ ...prev, sourceVerified: false })); }} placeholder="例如：2025 国考 · 地市级" className="h-10" /></Field><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.sourceVerified} onChange={(e) => setForm((prev) => ({ ...prev, sourceVerified: e.target.checked }))} className="size-4 accent-primary" /><span>我已核对来源</span></label><Field label="题干"><Textarea value={form.stem} onChange={(e) => update('stem', e.target.value)} placeholder="粘贴题干，或使用 DeepSeek 从图片中识别" className="min-h-28" /></Field>
       <div className="grid gap-3 sm:grid-cols-2">{(['A', 'B', 'C', 'D'] as const).map((key) => <Field key={key} label={`选项 ${key}`}><Input value={form[key]} onChange={(e) => update(key, e.target.value)} /></Field>)}</div>
       <div className="grid gap-4 sm:grid-cols-2"><Field label="我的选项"><select className={selectClass} value={form.myAnswer} onChange={(e) => update('myAnswer', e.target.value)}><option value="">请选择</option>{['A', 'B', 'C', 'D'].map((v) => <option key={v}>{v}</option>)}</select></Field><Field label="正确答案" hint="由官方答案或你本人确认"><select className={selectClass} value={form.correctAnswer} onChange={(e) => update('correctAnswer', e.target.value)}><option value="">请选择</option>{['A', 'B', 'C', 'D'].map((v) => <option key={v}>{v}</option>)}</select></Field></div>
-      <div className="grid gap-4 sm:grid-cols-2"><Field label="大模块"><select className={selectClass} value={form.module} onChange={(e) => { update('module', e.target.value); update('topic', topicTaxonomy[e.target.value]?.[0] || ''); }}>{modules.slice(1).map((v) => <option key={v}>{v}</option>)}</select></Field><Field label="细分考点"><select className={selectClass} value={form.topic} onChange={(e) => update('topic', e.target.value)}>{topics.map((v) => <option key={v}>{v}</option>)}</select></Field></div>
-      <Field label="标签" hint="用逗号或顿号分隔"><Input value={form.tags} onChange={(e) => update('tags', e.target.value)} placeholder="例如：基期量、增长率、截位直除" /></Field><Field label="错因类型"><select className={selectClass} value={form.causeType} onChange={(e) => update('causeType', e.target.value)}>{causeTypes.map((v) => <option key={v}>{v}</option>)}</select></Field><Field label="具体个人错因" hint="这是你的判断，AI不会替你填写"><Textarea value={form.personalCause} onChange={(e) => update('personalCause', e.target.value)} placeholder="我当时为什么会选错？" className="min-h-20" /></Field>
+      <div className="grid gap-4 sm:grid-cols-2"><Field label="大模块" hint="可选或自定义"><Input list="module-options" value={form.module} onChange={e=>{update('module',e.target.value);update('topic','');}} placeholder="待分类" /><datalist id="module-options">{modules.slice(1).map(v=><option key={v} value={v} />)}</datalist></Field><Field label="细分考点" hint="可选或自定义"><Input list="topic-options" value={form.topic} onChange={e=>update('topic',e.target.value)} placeholder="待分类" /><datalist id="topic-options">{topics.map(v=><option key={v} value={v} />)}</datalist></Field></div>
+      <Field label="标签" hint="用逗号或顿号分隔"><Input value={form.tags} onChange={(e) => update('tags', e.target.value)} placeholder="例如：基期量、增长率、截位直除" /></Field><Field label="错因类型"><select className={selectClass} value={form.causeType} onChange={(e) => update('causeType', e.target.value)}><option value="">暂未确认</option>{causeTypes.map((v) => <option key={v}>{v}</option>)}</select></Field><Field label="具体个人错因" hint="这是你的判断，AI不会替你填写"><Textarea value={form.personalCause} onChange={(e) => update('personalCause', e.target.value)} placeholder="我当时为什么会选错？" className="min-h-20" /></Field>
       <div className="rounded-[18px] border border-[#e2d8ca] bg-[#fffaf4] p-4 sm:p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="font-heading font-semibold">正确答案解析 <span className="font-sans text-xs font-normal text-muted-foreground">可选</span></h3><p className="mt-1 text-xs leading-5 text-muted-foreground">可以留空、手写、上传官方解析图片，或让 DeepSeek 根据题目和选项生成草稿。</p></div><Button type="button" variant="outline" size="sm" disabled={busy} onClick={generateAnswerAnalysis}>{busy ? <Loader2 className="animate-spin" /> : <Sparkles />} AI分析选项</Button></div><div className="mt-4"><Textarea value={form.correctReasoning} onChange={(e) => update('correctReasoning', e.target.value)} placeholder="输入官方解析或你认可的正确思路，也可以留空" className="min-h-28 bg-card" /></div><input aria-label="选择正确答案解析图片" ref={analysisFileRef} hidden type="file" accept="image/*" onChange={(e) => void pickAnswerAnalysisImage(e.target.files?.[0])} />{answerAnalysisImage ? <div className="relative mt-3 overflow-hidden rounded-xl border bg-card">{/* oxlint-disable-next-line next/no-img-element -- 本地 data URL 不适合图片优化器 */}<img src={answerAnalysisImage} alt="正确答案解析" className="max-h-[360px] w-full object-contain" /><button type="button" aria-label="移除解析图片" onClick={() => setAnswerAnalysisImage(undefined)} className="absolute right-2 top-2 rounded-full bg-black/65 p-2 text-white"><X className="size-4" /></button></div> : null}<Button type="button" variant="ghost" size="sm" className="mt-2" onClick={() => analysisFileRef.current?.click()}><ImagePlus /> {answerAnalysisImage ? '更换解析图片' : '上传解析图片'}</Button>{analysisDraft && <p className="mt-2 text-xs text-[#8a5a35]">已生成 AI 草稿，保存前仍可修改。AI没有更改你确认的正确答案。</p>}</div>
       <Field label="避坑提醒"><Textarea value={form.pitfall} onChange={(e) => update('pitfall', e.target.value)} placeholder="下次看到什么信号，要避免什么错误？" className="min-h-20" /></Field>{message && <p className="rounded-xl bg-muted px-3 py-2 text-xs text-muted-foreground">{message}</p>}
       <div className="flex justify-end gap-2 border-t pt-5"><Button variant="outline" onClick={onCancel}>取消</Button><Button onClick={submit}><Check /> {initialQuestion ? '保存修改' : '保存到错题库'}</Button></div></section></div></>;
 }
 
 function ReviewSession({ mode, questions, settings, mastery, isTodaySession, onBack, onChanged }: { mode: 'practice' | 'review'; questions: WrongQuestion[]; settings: AiSettings; mastery: number; isTodaySession: boolean; onBack: () => void; onChanged: () => Promise<void> }) {
+  const recordBusy = useRef(false);
+  const recordedIds = useRef(new Set<string>());
   const [queue] = useState(() => mode === 'practice' ? shuffle(questions) : [...questions]);
   const [index, setIndex] = useState(0);
   const [answer, setAnswer] = useState('');
@@ -375,7 +402,7 @@ function ReviewSession({ mode, questions, settings, mastery, isTodaySession, onB
     const cacheKey = `cuojian_lamb_celebration_${day}`;
     const cached = localStorage.getItem(cacheKey);
     if (cached) { queueMicrotask(() => setCelebration(cached)); return; }
-    if (!settings.apiKey) { queueMicrotask(() => setCelebrationError('请先在前端配置文件中填写 DeepSeek API Key，才能生成今天的小羊寄语。')); return; }
+    if (!settings.apiKey) { queueMicrotask(() => setCelebrationError('请先在设置中填写 DeepSeek API Key，才能生成今天的小羊寄语。')); return; }
     const correct = results.filter((result) => result.correct).length;
     const reviewResult: ReviewCelebrationInput = {
       mode,
@@ -395,24 +422,27 @@ function ReviewSession({ mode, questions, settings, mastery, isTodaySession, onB
   }, [finished, isTodaySession, mastery, mode, queue.length, results, settings]);
 
   async function record(correct: boolean, recordedAnswer: string) {
-    if (!question) return;
+    if (!question || recordedIds.current.has(question.id) || recordBusy.current) return false;
+    recordBusy.current = true;
+    const current = (await listQuestions()).find(q => q.id === question.id);
+    if (!current || current.correctAnswer !== question.correctAnswer) { recordBusy.current = false; alert('题目已删除或答案发生变化，请退出后重新进入。'); return false; }
     const level = correct ? Math.min(question.reviewLevel + 1, 5) : 0;
     const intervals = [1, 3, 7, 14, 30, 60];
     const now = new Date().toISOString();
-    await saveQuestion({ ...question, updatedAt: now, reviewLevel: level, nextReviewAt: new Date(Date.now() + intervals[level] * 86_400_000).toISOString(), status: level >= 5 ? 'mastered' : 'learning', attempts: [...question.attempts, { id: crypto.randomUUID(), answeredAt: now, answer: recordedAnswer, correct, mode, selfRating: mode === 'review' ? (correct ? 'mastered' : recordedAnswer === '未想起' ? 'unknown' : 'fuzzy') : undefined, durationMs: Math.max(1_000, Date.now() - questionStartedAt.current), revealedAnswer: mode === 'review' }] });
+    try { if (!await saveIfUnchanged({ ...current, updatedAt: now, reviewLevel: level, nextReviewAt: new Date(Date.now() + intervals[level] * 86_400_000).toISOString(), status: level >= 5 ? 'mastered' : 'learning', attempts: [...current.attempts, { id: crypto.randomUUID(), answeredAt: now, answer: recordedAnswer, correct, mode, selfRating: mode === 'review' ? (correct ? 'mastered' : recordedAnswer === '未想起' ? 'unknown' : 'fuzzy') : undefined, durationMs: Math.max(1_000, Date.now() - questionStartedAt.current), revealedAnswer: mode === 'review' }] }, current.updatedAt)) { alert('题目刚刚发生变化，请重新进入本轮练习。'); return false; }
+    recordedIds.current.add(question.id);
     setResults((previous) => [...previous, { correct }]);
-    await onChanged();
+    await onChanged(); return true;
+    } catch { alert('作答保存失败，请重试。'); return false; } finally { recordBusy.current = false; }
   }
   async function submitPractice() {
     if (!answer || !question) return;
     const correct = answer === question.correctAnswer;
-    await record(correct, answer);
-    setSubmitted(correct);
+    if (await record(correct, answer)) setSubmitted(correct);
   }
   async function gradeReview(rating: 'mastered' | 'fuzzy' | 'unknown') {
     if (!question) return;
-    await record(rating === 'mastered', rating === 'mastered' ? question.correctAnswer : rating === 'fuzzy' ? '有点模糊' : '未想起');
-    next();
+    if (await record(rating === 'mastered', rating === 'mastered' ? question.correctAnswer : rating === 'fuzzy' ? '有点模糊' : '未想起')) next();
   }
   function next() { setIndex((value) => value + 1); setAnswer(''); setRevealed(false); setSubmitted(undefined); questionStartedAt.current = Date.now(); }
 
@@ -425,13 +455,14 @@ function ReviewSession({ mode, questions, settings, mastery, isTodaySession, onB
   return <><div className="flex items-center justify-between"><button onClick={onBack} className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="size-4" /> 退出{mode === 'practice' ? '写题' : '复习'}</button><span className="text-xs text-muted-foreground">{index + 1} / {queue.length}</span></div><Progress value={(index + 1) / queue.length * 100} className="mt-4 h-1.5" />
     <section className="mx-auto mt-6 max-w-4xl rounded-[22px] border bg-card p-5 shadow-[0_12px_40px_rgba(28,42,47,.05)] sm:p-8">
       {question.imageDataUrl && <>{/* oxlint-disable-next-line next/no-img-element -- 本地 data URL 不适合图片优化器 */}<img src={question.imageDataUrl} alt="题目原图" className="mb-6 max-h-[480px] w-full rounded-xl border bg-white object-contain" /></>}
+      {question.extraImages?.filter(i=>i.role!=='analysis').map(i=><img key={i.id} src={i.dataUrl} alt="题目材料" className="mb-4 max-h-[480px] w-full object-contain" />)}
       <p className="whitespace-pre-wrap text-[16px] font-medium leading-8 sm:text-lg">{question.stem}</p>
       <div className="mt-6 grid gap-3">{Object.entries(question.options).map(([key, value]) => <button key={key} disabled={mode === 'review' || submitted !== undefined} onClick={() => setAnswer(key)} className={`flex items-start gap-3 rounded-xl border px-4 py-3 text-left transition-colors ${answer === key ? 'border-primary bg-[#eef2f0]' : 'bg-card hover:bg-muted/50'}`}><span className="grid size-7 shrink-0 place-items-center rounded-full border text-sm font-semibold">{key}</span><span className="pt-0.5 text-sm leading-6">{value}</span></button>)}</div>
       {mode === 'practice' && submitted === undefined && <Button className="mt-6 h-11 w-full" disabled={!answer} onClick={submitPractice}>提交答案</Button>}
       {mode === 'practice' && submitted !== undefined && <div className={`mt-6 rounded-xl p-4 text-sm ${submitted ? 'bg-[#edf6ef] text-[#315f42]' : 'bg-[#fff0e9] text-[#9a452f]'}`}><div className="flex items-center justify-between"><strong>{submitted ? '回答正确' : '回答错误'}</strong><Button size="sm" onClick={next}>{index + 1 === queue.length ? '完成' : '下一题'} <ChevronRight /></Button></div></div>}
       {mode === 'review' && !revealed && <Button className="mt-6 h-11 w-full" onClick={() => setRevealed(true)}>查看答案</Button>}
     </section>
-    {mode === 'review' && revealed && <section className="mx-auto mt-5 max-w-4xl space-y-5"><div className="rounded-[22px] border bg-card p-5 sm:p-7"><div className="flex flex-wrap gap-2"><Badge variant="secondary">{question.module}</Badge><Badge variant="outline">{question.topic}</Badge>{question.tags.map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>)}</div><div className="mt-5 grid gap-4 sm:grid-cols-2"><Info label="正确答案" value={question.correctAnswer} /><Info label="首次错因" value={question.attempts[0]?.personalCause || question.attempts[0]?.causeType || '未填写'} /></div>{question.correctReasoning && <AnalysisItem title="正确答案解析" body={question.correctReasoning} />}{question.answerAnalysisImageDataUrl && <AnswerAnalysisImage src={question.answerAnalysisImageDataUrl} />}{question.pitfall && <AnalysisItem title="避坑提醒" body={question.pitfall} />}{question.analysis && <div className="mt-5"><AnalysisBlock analysis={question.analysis} /></div>}</div><div className="grid gap-3 sm:grid-cols-3"><Button variant="outline" className="h-12" onClick={() => void gradeReview('unknown')}>仍然不会</Button><Button variant="outline" className="h-12" onClick={() => void gradeReview('fuzzy')}>有点模糊</Button><Button className="h-12" onClick={() => void gradeReview('mastered')}>已经掌握</Button></div></section>}
+    {mode === 'review' && revealed && <section className="mx-auto mt-5 max-w-4xl space-y-5"><div className="rounded-[22px] border bg-card p-5 sm:p-7"><div className="flex flex-wrap gap-2"><Badge variant="secondary">{question.module}</Badge><Badge variant="outline">{question.topic}</Badge>{question.tags.map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>)}</div><div className="mt-5 grid gap-4 sm:grid-cols-2"><Info label="正确答案" value={question.correctAnswer} /><Info label="首次错因" value={question.attempts[0]?.personalCause || question.attempts[0]?.causeType || '未填写'} /></div>{question.correctReasoning && <AnalysisItem title="正确答案解析" body={question.correctReasoning} />}{question.extraImages?.filter(i=>i.role==='analysis').map(i=><AnswerAnalysisImage key={i.id} src={i.dataUrl} />)}{question.answerAnalysisImageDataUrl && <AnswerAnalysisImage src={question.answerAnalysisImageDataUrl} />}{question.pitfall && <AnalysisItem title="避坑提醒" body={question.pitfall} />}{question.analysisStale && <p className="rounded-xl bg-muted p-3 text-sm">题目或答案已修改，旧解析和会话结论需重新核对。</p>}{question.analysis && <div className="mt-5"><AnalysisBlock analysis={question.analysis} /></div>}</div><div className="grid gap-3 sm:grid-cols-3"><Button variant="outline" className="h-12" onClick={() => void gradeReview('unknown')}>仍然不会</Button><Button variant="outline" className="h-12" onClick={() => void gradeReview('fuzzy')}>有点模糊</Button><Button className="h-12" onClick={() => void gradeReview('mastered')}>已经掌握</Button></div></section>}
   </>;
 }
 
@@ -444,18 +475,18 @@ function QuestionDetail({ question, questions, settings, onBack, onEdit, onChang
   async function analyze() {
     if (!settings.apiKey) return setMessage('请先在设置中填写 DeepSeek API Key。');
     setBusy(true); setMessage('');
-    const history = questions.filter((q) => q.id !== question.id && (q.topic === question.topic || q.module === question.module)).slice(0, 5).map((q) => ({ id: q.id, topic: q.topic, cause: q.attempts.at(-1)?.personalCause, results: q.attempts.map((a) => a.correct) }));
+    const history = questions.filter((q) => q.id !== question.id && !q.inbox && !q.isDemo && (q.topic === question.topic || q.tags.some(t => question.tags.includes(t)))).slice(0, 5).map((q) => ({ id: q.id, topic: q.topic, cause: q.attempts.at(-1)?.personalCause, results: q.attempts.map((a) => a.correct) }));
     try {
       const analysis = await requestDeepSeek<AiAnalysis>({ ...settings, action: 'analyze', imageDataUrl: question.imageDataUrl, question: { stem: question.stem, options: question.options, correctAnswer: question.correctAnswer, myAnswer: latestCause?.answer, personalCause: latestCause?.personalCause, module: question.module, topic: question.topic }, history });
       const now = new Date().toISOString();
       const analysisMessage: QuestionMessage = { id: crypto.randomUUID(), role: 'assistant', content: `${analysis.summary}\n\n正确思路：${analysis.correctReasoning}\n\n避坑提醒：${analysis.pitfall}`, createdAt: now };
-      await saveQuestion({ ...question, analysis, conversation: [...(question.conversation || []), analysisMessage], conversationSummary: analysis.summary, updatedAt: now }); setMessage('分析已保存到本地，也已加入本题会话。'); onChanged();
+      const saved = await saveIfUnchanged({ ...question, analysis, analysisStale:false, conversation: [...(question.conversation || []), analysisMessage], conversationSummary: analysis.summary, updatedAt: now }, question.updatedAt); setMessage(saved ? '分析已保存到本地，也已加入本题会话。' : '题目已被修改，本次旧版本分析未覆盖新数据。'); onChanged();
     } catch (error) { setMessage(error instanceof Error ? error.message : '分析失败'); } finally { setBusy(false); }
   }
   async function sendChat() {
     const prompt = chatInput.trim();
     if (!prompt || chatBusy) return;
-    if (!settings.apiKey) return setMessage('请先在前端配置文件中填写 DeepSeek API Key。');
+    if (!settings.apiKey) return setMessage('请先在设置中填写 DeepSeek API Key。');
     const now = new Date().toISOString();
     const userMessage: QuestionMessage = { id: crypto.randomUUID(), role: 'user', content: prompt, createdAt: now };
     const conversation = [...(question.conversation || []), userMessage];
@@ -463,30 +494,30 @@ function QuestionDetail({ question, questions, settings, onBack, onEdit, onChang
     setChatInput(''); setChatBusy(true); setMessage('');
     try {
       const shouldSendImage = Boolean(question.imageDataUrl && (!(question.conversation?.length) || /图|图片|图形|选项|细节/.test(prompt)));
-      const result = await requestDeepSeek<{ reply?: string; summary?: string }>({ ...settings, action: 'chat', imageDataUrl: shouldSendImage ? question.imageDataUrl : undefined, question: { stem: question.stem, options: question.options, correctAnswer: question.correctAnswer, answerSource: question.answerSource, module: question.module, topic: question.topic, tags: question.tags, personalCause: latestCause?.personalCause, conversationSummary: question.conversationSummary }, history, messages: conversation.slice(-10).map(({ role, content }) => ({ role, content })) });
+      const result = await requestDeepSeek<{ reply?: string; summary?: string }>({ ...settings, action: 'chat', imageDataUrl: shouldSendImage ? question.imageDataUrl : undefined, question: { stem: question.stem, options: question.options, correctAnswer: question.correctAnswer, answerSource: question.answerSource, module: question.module, topic: question.topic, tags: question.tags, personalCause: latestCause?.personalCause, conversationSummary: question.analysisStale ? undefined : question.conversationSummary, analysisStale:question.analysisStale }, history, messages: (question.analysisStale ? [userMessage] : conversation.slice(-10)).map(({ role, content }) => ({ role, content })) });
       if (!result.reply) throw new Error('DeepSeek 没有返回有效回答');
       const assistantMessage: QuestionMessage = { id: crypto.randomUUID(), role: 'assistant', content: result.reply, createdAt: new Date().toISOString() };
-      await saveQuestion({ ...question, conversation: [...conversation, assistantMessage], conversationSummary: result.summary || question.conversationSummary, updatedAt: assistantMessage.createdAt });
+      if (!await saveIfUnchanged({ ...question, conversation: [...conversation, assistantMessage], conversationSummary: result.summary || question.conversationSummary, updatedAt: assistantMessage.createdAt }, question.updatedAt)) setMessage('题目已被修改，本次回答未覆盖新数据。');
       onChanged();
     } catch (error) { setMessage(error instanceof Error ? error.message : '追问失败'); setChatInput(prompt); } finally { setChatBusy(false); }
   }
   async function resetConversation() {
     if (!confirm('确定清空这道题的会话吗？题目和作答记录会保留。')) return;
-    await saveQuestion({ ...question, conversation: [], conversationSummary: undefined, updatedAt: new Date().toISOString() });
+    await saveQuestion({ ...question, conversation: [], conversationResetAt: new Date().toISOString(), conversationSummary: undefined, updatedAt: new Date().toISOString() });
     onChanged();
   }
   async function toggleMastered() { await saveQuestion({ ...question, status: question.status === 'mastered' ? 'learning' : 'mastered', updatedAt: new Date().toISOString() }); onChanged(); }
-  async function remove() { if (!confirm('确定删除这道错题吗？此操作无法撤销。')) return; await deleteQuestion(question.id); onChanged(); onBack(); }
+  async function remove() { if (!confirm('将这道题移入最近删除吗？可在待整理箱恢复。')) return; await deleteQuestion(question.id); onChanged(); onBack(); }
   return <><button onClick={onBack} className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="size-4" /> 返回</button><div className="mt-5 flex flex-wrap items-start justify-between gap-4"><div><div className="flex flex-wrap gap-2"><Badge variant="secondary">{question.module}</Badge><Badge variant="outline">{question.topic}</Badge>{question.isDemo && <Badge variant="outline">示例数据</Badge>}</div><h1 className="mt-3 max-w-4xl font-heading text-2xl font-semibold">错题详情</h1></div><div className="flex flex-wrap gap-2"><Button variant="outline" onClick={onEdit}><PencilLine /> 编辑</Button><Button variant="outline" onClick={toggleMastered}>{question.status === 'mastered' ? <RotateCcw /> : <Check />}{question.status === 'mastered' ? '恢复复习' : '标为掌握'}</Button><Button variant="destructive" onClick={remove}><Trash2 /> 删除</Button></div></div>
     <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]"><section className="space-y-5"><div className="rounded-[22px] border bg-card p-5 sm:p-7"><div className="flex items-center justify-between text-xs text-muted-foreground"><span>{question.source}{!question.sourceVerified ? ' · 来源待核对' : ''}</span><span>已复刷 {Math.max(0, question.attempts.length - 1)} 次</span></div>{question.imageDataUrl && <>{/* oxlint-disable-next-line next/no-img-element -- 本地 data URL 不适合图片优化器 */}<img src={question.imageDataUrl} alt="题目原图" className="mt-5 max-h-[460px] w-full rounded-xl border bg-white object-contain" /></>}<p className="mt-5 whitespace-pre-wrap text-[16px] leading-8">{question.stem}</p><div className="mt-5 grid gap-3">{Object.entries(question.options).map(([key, value]) => <div key={key} className={`flex items-start gap-3 rounded-xl border px-4 py-3 ${key === question.correctAnswer ? 'border-[#77a084] bg-[#edf6ef]' : 'bg-card'}`}><span className="grid size-7 shrink-0 place-items-center rounded-full border text-sm font-semibold">{key}</span><span className="pt-0.5 text-sm leading-6">{value}</span></div>)}</div>{message && <p className="mt-4 rounded-xl bg-muted px-4 py-3 text-sm text-muted-foreground">{message}</p>}</div>
-      <div className="rounded-[22px] border bg-card p-5 sm:p-7"><div className="grid gap-4 sm:grid-cols-2"><Info label="正确答案" value={question.correctAnswer} /><Info label="答案依据" value={question.answerSource === 'official' ? '官方答案' : question.answerSource === 'user' ? '用户确认' : 'AI推测，待确认'} /><Info label="首次错误" value={question.attempts[0]?.answer || '未记录'} /><Info label="个人错因" value={latestCause?.personalCause || latestCause?.causeType || '未填写'} /></div>{question.correctReasoning && <AnalysisItem title="正确答案解析" body={question.correctReasoning} />}{question.answerAnalysisImageDataUrl && <AnswerAnalysisImage src={question.answerAnalysisImageDataUrl} />}{question.pitfall && <AnalysisItem title="我记录的避坑提醒" body={question.pitfall} />}</div>
-      {question.analysis && <AnalysisBlock analysis={question.analysis} />}
+      <div className="rounded-[22px] border bg-card p-5 sm:p-7"><div className="grid gap-4 sm:grid-cols-2"><Info label="正确答案" value={question.correctAnswer} /><Info label="答案依据" value={question.answerSource === 'official' ? '官方答案' : question.answerSource === 'user' ? '用户确认' : 'AI推测，待确认'} /><Info label="首次错误" value={question.attempts[0]?.answer || '未记录'} /><Info label="个人错因" value={latestCause?.personalCause || latestCause?.causeType || '未填写'} /></div>{question.correctReasoning && <AnalysisItem title="正确答案解析" body={question.correctReasoning} />}{question.extraImages?.filter(i=>i.role==='analysis').map(i=><AnswerAnalysisImage key={i.id} src={i.dataUrl} />)}{question.answerAnalysisImageDataUrl && <AnswerAnalysisImage src={question.answerAnalysisImageDataUrl} />}{question.pitfall && <AnalysisItem title="我记录的避坑提醒" body={question.pitfall} />}</div>
+      {question.analysisStale && <p className="rounded-xl bg-muted p-3 text-sm">题目或答案已修改，旧解析和会话结论需重新核对。</p>}{question.analysis && <AnalysisBlock analysis={question.analysis} />}
       <div className="rounded-[22px] border bg-card p-5 sm:p-7"><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-heading text-lg font-semibold">继续问这道题</h2><p className="mt-1 text-xs text-muted-foreground">会话只保存在本题档案中；回答会结合相关 Skill 和有证据的同类错题。</p></div>{Boolean(question.conversation?.length) && <Button variant="ghost" size="sm" onClick={() => void resetConversation()}>重置会话</Button>}</div>{question.conversation?.length ? <div className="mt-5 space-y-3">{question.conversation.map((item) => <div key={item.id} className={`max-w-[90%] rounded-2xl px-4 py-3 text-sm leading-7 ${item.role === 'user' ? 'ml-auto bg-primary text-primary-foreground' : 'bg-muted text-foreground'}`}><p className="whitespace-pre-wrap">{item.content}</p><p className={`mt-1 text-[10px] ${item.role === 'user' ? 'text-primary-foreground/60' : 'text-muted-foreground'}`}>{formatDate(item.createdAt)}</p></div>)}</div> : <p className="mt-5 rounded-2xl bg-muted px-4 py-4 text-sm text-muted-foreground">分析后继续追问，或者直接问“为什么不能选 B？”“我以前错过类似题吗？”</p>}<div className="mt-5 flex items-end gap-2"><Textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} placeholder="继续追问这道题……" className="min-h-20 resize-none" onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendChat(); } }} /><Button aria-label="发送追问" className="h-11 w-11 shrink-0 p-0" disabled={!chatInput.trim() || chatBusy} onClick={() => void sendChat()}>{chatBusy ? <Loader2 className="animate-spin" /> : <Send />}</Button></div></div></section>
       <aside className="space-y-4"><div className="rounded-[22px] border bg-card p-5"><h2 className="font-heading font-semibold">标签</h2><div className="mt-3 flex flex-wrap gap-2">{question.tags.length ? question.tags.map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>) : <span className="text-sm text-muted-foreground">暂无标签</span>}</div></div><div className="rounded-[22px] border bg-card p-5"><h2 className="font-heading font-semibold">复习轨迹</h2><div className="mt-4 space-y-4">{question.attempts.map((attempt, i) => <div key={attempt.id} className="flex gap-3"><span className={`mt-1 size-2.5 rounded-full ${attempt.correct ? 'bg-[#4f8562]' : 'bg-[#d65c3a]'}`} /><div><p className="text-sm font-medium">{i === 0 ? '首次作答' : `第 ${i} 次复刷`} · {attempt.answer || '未记录'} · {attempt.correct ? '正确' : '错误'}</p><p className="mt-1 text-xs text-muted-foreground">{formatDate(attempt.answeredAt)}{attempt.causeType ? ` · ${attempt.causeType}` : ''}</p></div></div>)}</div></div>
       <div className="rounded-[22px] bg-[#263b43] p-5 text-white"><div className="flex items-center gap-2 text-sm font-semibold text-[#f2c590]"><Sparkles className="size-4" /> 按需讲解</div><p className="mt-3 text-sm leading-6 text-white/70">点击后会把本题、原图和最多 5 道同类历史摘要发送给 DeepSeek；它不会修改正确答案。</p><Button className="mt-4 w-full bg-white text-[#263b43] hover:bg-white/90" disabled={busy} onClick={analyze}>{busy ? <Loader2 className="animate-spin" /> : <Sparkles />}{question.analysis ? '重新分析' : '分析这道题'}</Button></div></aside></div></>;
 }
 
-function AnalysisBlock({ analysis }: { analysis: AiAnalysis }) { return <div className="rounded-[22px] border border-[#e2d2bd] bg-[#fffaf1] p-5 sm:p-7"><div className="flex items-center justify-between"><h2 className="flex items-center gap-2 font-heading text-lg font-semibold"><Sparkles className="size-5 text-[#b16b39]" /> DeepSeek 分析</h2><Badge variant="outline">可信度 {analysis.confidence}</Badge></div><p className="mt-4 text-sm leading-7">{analysis.summary}</p><AnalysisItem title="正确思路" body={analysis.correctReasoning} /><AnalysisItem title="我的错误" body={analysis.myErrorDiagnosis} />{analysis.optionAnalysis && <AnalysisItem title="选项比较" body={analysis.optionAnalysis} />}<AnalysisItem title="避坑提醒" body={analysis.pitfall} />{analysis.historyInsight && <AnalysisItem title="历史对照" body={analysis.historyInsight} />}</div>; }
+function AnalysisBlock({ analysis }: { analysis: AiAnalysis }) { return <div className="rounded-[22px] border border-[#e2d2bd] bg-[#fffaf1] p-5 sm:p-7"><div className="flex items-center justify-between"><h2 className="flex items-center gap-2 font-heading text-lg font-semibold"><Sparkles className="size-5 text-[#b16b39]" /> DeepSeek 分析</h2><Badge variant="outline">AI 草稿 · 请核对</Badge></div><p className="mt-4 text-sm leading-7">{analysis.summary}</p><AnalysisItem title="正确思路" body={analysis.correctReasoning} /><AnalysisItem title="我的错误" body={analysis.myErrorDiagnosis} />{analysis.optionAnalysis && <AnalysisItem title="选项比较" body={analysis.optionAnalysis} />}<AnalysisItem title="避坑提醒" body={analysis.pitfall} />{analysis.historyInsight && <AnalysisItem title="历史对照" body={analysis.historyInsight} />}</div>; }
 
 function Stats({ questions, settings, onOpen, onStart }: { questions: WrongQuestion[]; settings: AiSettings; onOpen: (id: string) => void; onStart: (mode: 'practice' | 'review', questions: WrongQuestion[]) => void }) {
   const [days, setDays] = useState<7 | 30 | 90 | 'all'>(30);
@@ -498,7 +529,7 @@ function Stats({ questions, settings, onOpen, onStart }: { questions: WrongQuest
   const [diagnosisNow] = useState(() => Date.now());
   const sources = unique(questions.map((question) => question.source));
   const periodStart = days === 'all' ? 0 : diagnosisNow - days * 86_400_000;
-  const scopedQuestions = questions.filter((question) => (!source || question.source === source) && (!periodStart || question.attempts.some((attempt) => new Date(attempt.answeredAt).getTime() >= periodStart)));
+  const scopedQuestions = questions.filter((question) => !question.isDemo && !question.inbox && question.answerConfirmed !== false && (!source || question.source === source) && (!periodStart || question.attempts.some((attempt) => new Date(attempt.answeredAt).getTime() >= periodStart)));
   const diagnoses = useMemo(() => diagnoseWeaknesses(questions, { days, source: source || undefined }), [days, questions, source]);
   const attempts = scopedQuestions.flatMap((question) => question.attempts.filter((attempt) => !periodStart || new Date(attempt.answeredAt).getTime() >= periodStart));
   const reliableCount = diagnoses.filter((item) => item.evidenceLevel !== '待观察').length;
@@ -613,10 +644,11 @@ function Settings({ settings, setSettings, githubSync, setGithubSync, syncStatus
     setAutoUpdate(value);
     localStorage.setItem('cuojian_auto_update', String(value));
   }
-  function exportData() { const blob = new Blob([JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), questions }, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `错见备份-${new Date().toISOString().slice(0, 10)}.json`; a.click(); URL.revokeObjectURL(url); }
-  async function importData(file?: File) { if (!file) return; try { const parsed = JSON.parse(await file.text()); if (!Array.isArray(parsed.questions)) throw new Error(); await replaceAllQuestions(parsed.questions); localStorage.setItem('cuojian_initialized', 'true'); setMessage(`已导入 ${parsed.questions.length} 道错题。`); onImported(); } catch { setMessage('备份文件格式不正确。'); } }
+  async function exportData() { const questions = await listQuestions(true); const blob = new Blob([JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), questions }, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `错见备份-${new Date().toISOString().slice(0, 10)}.json`; a.click(); URL.revokeObjectURL(url); }
+  async function importData(file?: File) { if (!file) return; try { const incoming = validateBackup(JSON.parse(await file.text())); const current = await listQuestions(true); if (!confirm(`备份含 ${incoming.length} 道题，本机 ${current.length} 道。合并导入（同ID保留较新记录），并自动保存导入前快照？`)) return; await replaceAllQuestions(mergeBackup(current,incoming)); localStorage.setItem('cuojian_initialized', 'true'); setMessage(`已合并导入 ${incoming.length} 道错题。原数据快照可恢复。`); onImported(); } catch (e) { setMessage(e instanceof Error ? e.message : '备份文件格式不正确。'); } }
 
   return <>
+    <Button variant="outline" onClick={async()=>{if(!confirm('恢复最近一次导入前的数据？导入后的修改会被替换，请先导出当前备份。'))return;try{await restoreBeforeImport();onImported();setMessage('已恢复导入前快照');}catch(e){setMessage(e instanceof Error?e.message:'恢复失败');}}}>恢复导入前快照</Button>
     <PageHeader eyebrow="本机设置" title="DeepSeek、同步与更新" description="错题仍以本机为主；GitHub 只保存加密副本，软件更新不会覆盖学习数据。" />
     <div className="mt-7 grid gap-6 xl:grid-cols-2">
       <section className="space-y-5 rounded-[22px] border bg-card p-6">
@@ -654,7 +686,7 @@ function Settings({ settings, setSettings, githubSync, setGithubSync, syncStatus
   </>;
 }
 
-function QuestionRow({ question, border, onClick, selected, onSelect }: { question: WrongQuestion; border: boolean; onClick: () => void; selected?: boolean; onSelect?: () => void }) { const last = question.attempts.at(-1); return <div className="relative flex"><span className={`w-2 shrink-0 ${question.module === '资料分析' ? 'bg-[#dc5f3d]' : question.module === '判断推理' ? 'bg-[#315a74]' : 'bg-[#a27b36]'}`} />{onSelect && <button aria-label={selected ? '取消选择这道题' : '选择这道题'} aria-pressed={selected} onClick={onSelect} className={`ml-4 mt-5 grid size-6 shrink-0 place-items-center rounded-md border transition-colors ${selected ? 'border-primary bg-primary text-primary-foreground' : 'bg-background text-transparent hover:border-primary/50'}`}><Check className="size-4" /></button>}<button className="group grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_auto] items-stretch text-left transition-colors hover:bg-muted/45" onClick={onClick}><span className={`min-w-0 px-5 py-5 sm:px-6 ${border ? 'border-b' : ''}`}><span className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{question.source}</span><span>·</span><span>{question.status === 'mastered' ? '已掌握' : `复习等级 ${question.reviewLevel}`}</span></span><span className="mt-2 block line-clamp-2 text-[15px] font-medium sm:text-base">{question.stem}</span><span className="mt-3 flex flex-wrap gap-2"><Badge variant="secondary">{question.module}</Badge><Badge variant="outline">{question.topic}</Badge>{last?.causeType && <Badge variant="outline" className="border-[#ebd3cc] bg-[#fff7f4] text-[#a64e37]">{last.causeType}</Badge>}</span></span><span className={`grid place-items-center px-4 text-muted-foreground ${border ? 'border-b' : ''}`}><ChevronRight className="size-5 transition-transform group-hover:translate-x-1" /></span></button></div>; }
+function QuestionRow({ question, border, onClick, selected, onSelect }: { question: WrongQuestion; border: boolean; onClick: () => void; selected?: boolean; onSelect?: () => void }) { const last = question.attempts.at(-1); return <div className="relative flex"><span className={`w-2 shrink-0 ${question.module === '资料分析' ? 'bg-[#dc5f3d]' : question.module === '判断推理' ? 'bg-[#315a74]' : 'bg-[#a27b36]'}`} />{onSelect && <button aria-label={selected ? '取消选择这道题' : '选择这道题'} aria-pressed={selected} onClick={onSelect} className={`ml-4 mt-5 grid size-6 shrink-0 place-items-center rounded-md border transition-colors ${selected ? 'border-primary bg-primary text-primary-foreground' : 'bg-background text-transparent hover:border-primary/50'}`}><Check className="size-4" /></button>}<button className="group grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_auto] items-stretch text-left transition-colors hover:bg-muted/45" onClick={onClick}><span className={`min-w-0 px-5 py-5 sm:px-6 ${border ? 'border-b' : ''}`}><span className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{question.source}</span><span>收录于 {new Date(captureDate(question)).toLocaleString('zh-CN')}</span><span>·</span><span>{question.status === 'mastered' ? '已掌握' : `复习等级 ${question.reviewLevel}`}</span></span><span className="mt-2 block line-clamp-2 text-[15px] font-medium sm:text-base">{question.stem}</span><span className="mt-3 flex flex-wrap gap-2"><Badge variant="secondary">{question.module}</Badge><Badge variant="outline">{question.topic}</Badge>{last?.causeType && <Badge variant="outline" className="border-[#ebd3cc] bg-[#fff7f4] text-[#a64e37]">{last.causeType}</Badge>}</span></span><span className={`grid place-items-center px-4 text-muted-foreground ${border ? 'border-b' : ''}`}><ChevronRight className="size-5 transition-transform group-hover:translate-x-1" /></span></button></div>; }
 
 function PageHeader({ eyebrow, title, description, compact = false }: { eyebrow: string; title: string; description: string; compact?: boolean }) { return <header className={compact ? 'mt-5' : ''}><p className="text-xs font-semibold tracking-[.16em] text-[#a85b3d]">{eyebrow}</p><h1 className="mt-1 font-heading text-3xl font-semibold tracking-tight">{title}</h1><p className="mt-2 text-sm text-muted-foreground">{description}</p></header>; }
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) { return <label className="block"><span className="mb-2 flex items-center justify-between text-sm font-medium"><span>{label}</span>{hint && <span className="text-[11px] font-normal text-muted-foreground">{hint}</span>}</span>{children}</label>; }
@@ -662,7 +694,7 @@ function Info({ label, value }: { label: string; value: string }) { return <div 
 function AnalysisItem({ title, body }: { title: string; body: string }) { return <div className="mt-5 border-t border-[#e8dccb] pt-4"><h3 className="text-sm font-semibold text-[#765334]">{title}</h3><p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-[#443b32]">{body}</p></div>; }
 function AnswerAnalysisImage({ src }: { src: string }) { return <div className="mt-5 border-t border-[#e8dccb] pt-4"><h3 className="text-sm font-semibold text-[#765334]">解析图片</h3>{/* oxlint-disable-next-line next/no-img-element -- 本地 data URL 不适合图片优化器 */}<img src={src} alt="用户保存的正确答案解析" className="mt-3 max-h-[520px] w-full rounded-xl border bg-white object-contain" /></div>; }
 function NavItem({ icon: Icon, label, count, active, onClick }: { icon: typeof Archive; label: string; count?: string; active?: boolean; onClick: () => void }) { return <button onClick={onClick} className={`flex h-11 w-full items-center gap-3 rounded-xl px-3 text-sm transition-colors ${active ? 'bg-[#e8eeeb] font-semibold text-primary' : 'text-muted-foreground hover:bg-muted'}`}><Icon className="size-[18px]" /><span>{label}</span>{count && <span className="ml-auto text-xs">{count}</span>}</button>; }
-function MobileNav({ view, navigate }: { view: View; navigate: (view: View) => void }) { const items: Array<[View, typeof Archive, string]> = [['dashboard', CalendarDays, '复习'], ['library', Archive, '错题'], ['add', CirclePlus, '录入'], ['stats', Target, '诊断'], ['settings', Settings2, '设置']]; return <nav className="fixed inset-x-3 bottom-3 z-20 grid grid-cols-5 rounded-2xl border bg-card/95 p-2 shadow-xl backdrop-blur lg:hidden" aria-label="移动端导航">{items.map(([target, Icon, label]) => <button key={target} onClick={() => navigate(target)} className={`flex flex-col items-center gap-1 rounded-xl py-2 text-[11px] ${view === target ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`}><Icon className="size-[18px]" />{label}</button>)}</nav>; }
+function MobileNav({ view, navigate }: { view: View; navigate: (view: View) => void }) { const items: Array<[View, typeof Archive, string]> = [['dashboard', CalendarDays, '复习'], ['library', Archive, '错题'], ['inbox', FileImage, '收题'], ['stats', Target, '诊断'], ['settings', Settings2, '设置']]; return <nav className="fixed inset-x-3 bottom-3 z-20 grid grid-cols-5 rounded-2xl border bg-card/95 p-2 shadow-xl backdrop-blur lg:hidden" aria-label="移动端导航">{items.map(([target, Icon, label]) => <button key={target} onClick={() => navigate(target)} className={`flex flex-col items-center gap-1 rounded-xl py-2 text-[11px] ${view === target ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`}><Icon className="size-[18px]" />{label}</button>)}</nav>; }
 function Metric({ label, value, note, icon: Icon, tone }: { label: string; value: string; note: string; icon: typeof Target; tone: 'warm' | 'blue' | 'green' }) { const tones = { warm: 'bg-[#fff0e9] text-[#b34f35]', blue: 'bg-[#e9f1f4] text-[#315a74]', green: 'bg-[#e8f0eb] text-[#3f6a51]' }; return <div className="flex items-center gap-4 rounded-[20px] border bg-card p-4 shadow-[0_8px_28px_rgba(28,42,47,.04)] sm:p-5"><div className={`grid size-11 shrink-0 place-items-center rounded-2xl ${tones[tone]}`}><Icon className="size-5" /></div><div><p className="text-xs text-muted-foreground">{label}</p><div className="mt-0.5 flex items-baseline gap-2"><strong className="font-heading text-2xl">{value}</strong><span className="text-xs text-muted-foreground">{note}</span></div></div></div>; }
 function Empty({ title, body, action, onAction }: { title: string; body?: string; action?: string; onAction?: () => void }) { return <div className="mt-5 grid min-h-64 place-items-center rounded-[22px] border border-dashed bg-card/50 p-8 text-center"><div><div className="mx-auto grid size-12 place-items-center rounded-2xl bg-muted"><Archive className="size-5 text-muted-foreground" /></div><h3 className="mt-4 font-heading text-lg font-semibold">{title}</h3>{body && <p className="mt-2 text-sm text-muted-foreground">{body}</p>}{action && <Button className="mt-4" onClick={onAction}>{action}</Button>}</div></div>; }
 function LoadingState() { return <div className="grid min-h-[70vh] place-items-center"><div className="flex items-center gap-3 text-sm text-muted-foreground"><Loader2 className="animate-spin" /> 正在打开本地错题库</div></div>; }

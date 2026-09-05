@@ -72,7 +72,7 @@ export async function syncWithGithub(localQuestions: WrongQuestion[], settings: 
     if (localHash === remoteEntry.hash) { nextHashes[id] = localHash; continue; }
     const cloud = await downloadQuestion(settings, remoteEntry);
     const baseHash = lastHashes[id];
-    if (baseHash && baseHash !== localHash && baseHash !== remoteEntry.hash && local.updatedAt !== cloud.updatedAt) {
+    if (baseHash && baseHash !== localHash && baseHash !== remoteEntry.hash) {
       const merged = mergeAppendOnly(local.updatedAt >= cloud.updatedAt ? local : cloud, local.updatedAt >= cloud.updatedAt ? cloud : local);
       conflicts.push({ id, local, cloud, cloudHash: remoteEntry.hash, detectedAt: new Date().toISOString() });
       resultMap.set(id, merged);
@@ -168,8 +168,9 @@ function questionPath(id: string) {
 
 function mergeAppendOnly(primary: WrongQuestion, secondary: WrongQuestion): WrongQuestion {
   const attempts = unionById(primary.attempts, secondary.attempts).sort((a, b) => a.answeredAt.localeCompare(b.answeredAt));
-  const conversation = unionById(primary.conversation || [], secondary.conversation || []).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  return { ...primary, attempts, conversation };
+  const conversationResetAt = [primary.conversationResetAt,secondary.conversationResetAt].filter((x):x is string=>!!x).sort((a,b)=>a.localeCompare(b)).at(-1);
+  const conversation = unionById(primary.conversation || [], secondary.conversation || []).filter(m => !conversationResetAt || m.createdAt > conversationResetAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  return { ...primary, attempts, conversation, conversationResetAt };
 }
 
 function unionById<T extends { id: string }>(first: T[], second: T[]) {

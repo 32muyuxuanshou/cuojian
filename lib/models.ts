@@ -33,6 +33,17 @@ export interface QuestionMessage {
 
 export interface WrongQuestion {
   id: string;
+  capturedAt?: string;
+  organizedAt?: string;
+  deletedAt?: string;
+  inbox?: boolean;
+  organizeState?: 'pending' | 'queued' | 'running' | 'done' | 'review' | 'error';
+  organizeError?: string;
+  answerConfirmed?: boolean;
+  suggestedAnswer?: string;
+  extraImages?: Array<{ id: string; role: 'question' | 'material' | 'analysis'; dataUrl: string }>;
+  analysisStale?: boolean;
+  conversationResetAt?: string;
   createdAt: string;
   updatedAt: string;
   source: string;

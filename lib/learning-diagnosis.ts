@@ -42,7 +42,7 @@ const causeAdvice: Record<string, string> = {
 export function diagnoseWeaknesses(questions: WrongQuestion[], options: DiagnosisOptions = {}): WeaknessDiagnosis[] {
   const now = Date.now();
   const start = options.days && options.days !== 'all' ? now - options.days * 86_400_000 : 0;
-  const scoped = questions.filter((question) => (!options.source || question.source === options.source)
+  const scoped = questions.filter((question) => !question.isDemo && !question.inbox && !question.deletedAt && question.answerConfirmed !== false && !!question.correctAnswer && (!options.source || question.source === options.source)
     && (!start || question.attempts.some((attempt) => new Date(attempt.answeredAt).getTime() >= start)));
   const groups = new Map<string, WrongQuestion[]>();
   scoped.forEach((question) => {
@@ -52,14 +52,15 @@ export function diagnoseWeaknesses(questions: WrongQuestion[], options: Diagnosi
 
   return [...groups.entries()].map(([key, group]) => {
     const periodAttempts = group.flatMap((question) => question.attempts.filter((attempt) => new Date(attempt.answeredAt).getTime() >= start));
-    const repeatAttempts = group.flatMap((question) => question.attempts.slice(1).filter((attempt) => new Date(attempt.answeredAt).getTime() >= start));
-    const reviewAttempts = repeatAttempts.filter((attempt) => attempt.mode === 'review' || attempt.answer === '未想起');
+    const repeated = group.flatMap((question) => question.attempts.filter((attempt, index) => (attempt.mode ? attempt.mode !== 'initial' : index > 0) && new Date(attempt.answeredAt).getTime() >= start));
+    const repeatAttempts = repeated.filter(a => a.mode !== 'review' && !a.selfRating && !a.revealedAnswer);
+    const reviewAttempts = repeated.filter((attempt) => attempt.mode === 'review' || attempt.answer === '未想起');
     const repeatErrorRate = repeatAttempts.length ? repeatAttempts.filter((attempt) => !attempt.correct).length / repeatAttempts.length : undefined;
     const fuzzyRate = reviewAttempts.length ? reviewAttempts.filter((attempt) => attempt.selfRating !== 'mastered' && !attempt.correct).length / reviewAttempts.length : undefined;
     const overdueCount = group.filter((question) => question.status !== 'mastered' && new Date(question.nextReviewAt).getTime() <= now).length;
     const levelRisk = average(group.map((question) => 1 - Math.min(question.reviewLevel, 5) / 5));
     const overdueRisk = group.length ? overdueCount / group.length : 0;
-    const causeCounts = count(group.flatMap((question) => question.attempts.map((attempt) => attempt.causeType).filter(Boolean) as string[]));
+    const causeCounts = count(group.flatMap((question) => [...new Set(question.attempts.filter(a => Date.parse(a.answeredAt) >= start).map((attempt) => attempt.causeType).filter(Boolean))] as string[]));
     const topCause = causeCounts[0]?.[0];
     const repeatedCauseRisk = causeCounts[0] && group.length > 1 ? Math.min(1, causeCounts[0][1] / group.length) : 0;
 
@@ -69,7 +70,7 @@ export function diagnoseWeaknesses(questions: WrongQuestion[], options: Diagnosi
     const weightTotal = weighted.reduce((sum, [, weight]) => sum + weight, 0);
     const rawScore = weighted.reduce((sum, [value, weight]) => sum + value * weight, 0) / Math.max(1, weightTotal) * 100;
     const score = Math.round(rawScore);
-    const evidenceLevel: EvidenceLevel = group.length >= 5 ? '较强' : group.length >= 2 ? '中等' : '待观察';
+    const evidenceLevel: EvidenceLevel = group.filter(q => q.attempts.some(a => a.mode === 'practice' && Date.parse(a.answeredAt) >= start)).length >= 5 && repeatAttempts.length >= 10 ? '较强' : group.filter(q => q.attempts.some(a => a.mode === 'practice' && Date.parse(a.answeredAt) >= start)).length >= 2 && repeatAttempts.length >= 4 ? '中等' : '待观察';
     const trend = getTrend(repeatAttempts);
     const status: WeaknessStatus = evidenceLevel === '待观察'
       ? '待观察'

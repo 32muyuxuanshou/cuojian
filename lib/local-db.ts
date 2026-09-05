@@ -11,9 +11,10 @@ function notifyDataChanged(type: 'save' | 'delete' | 'replace', id?: string) {
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 1);
+    const request = indexedDB.open(DB_NAME, 2);
     request.onupgradeneeded = () => {
       const db = request.result;
+      if (!db.objectStoreNames.contains('recovery')) db.createObjectStore('recovery');
       if (!db.objectStoreNames.contains(STORE)) {
         const store = db.createObjectStore(STORE, { keyPath: 'id' });
         store.createIndex('updatedAt', 'updatedAt');
@@ -25,12 +26,12 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-export async function listQuestions(): Promise<WrongQuestion[]> {
+export async function listQuestions(includeDeleted = false): Promise<WrongQuestion[]> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, 'readonly');
     const request = tx.objectStore(STORE).getAll();
-    request.onsuccess = () => resolve((request.result as WrongQuestion[]).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
+    request.onsuccess = () => resolve((request.result as WrongQuestion[]).filter(q => includeDeleted || !q.deletedAt).map(q => ({ ...q, capturedAt: q.capturedAt || q.createdAt })).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
     request.onerror = () => reject(request.error);
     tx.oncomplete = () => db.close();
   });
@@ -46,7 +47,61 @@ export async function saveQuestion(question: WrongQuestion): Promise<void> {
   });
 }
 
+export async function saveIfUnchanged(question: WrongQuestion, expectedUpdatedAt: string): Promise<boolean> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    let saved = false;
+    const request = store.get(question.id);
+    request.onsuccess = () => { if (request.result && !request.result.deletedAt && request.result.updatedAt === expectedUpdatedAt) { store.put(question); saved = true; } };
+    tx.oncomplete = () => { db.close(); if (saved) notifyDataChanged('save', question.id); resolve(saved); };
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 export async function deleteQuestion(id: string): Promise<void> {
+  return trashQuestions([id]);
+}
+
+export async function trashQuestions(ids: string[], restore = false): Promise<void> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    for (const id of ids) {
+      const request = store.get(id);
+      request.onsuccess = () => { if (request.result) store.put({ ...request.result, deletedAt: restore ? undefined : new Date().toISOString(), updatedAt: new Date().toISOString(), organizeState: request.result.organizeState === 'running' ? 'pending' : request.result.organizeState }); };
+    }
+    tx.oncomplete = () => { db.close(); notifyDataChanged('replace'); resolve(); };
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// Only apply remote results to records unchanged since the request began.
+export async function applySyncResults(before: WrongQuestion[], incoming: WrongQuestion[]): Promise<void> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    const baseline = new Map(before.map(q => [q.id, JSON.stringify(q)]));
+    const remote = new Map(incoming.map(q => [q.id, q]));
+    const request = store.getAll();
+    request.onsuccess = () => {
+      const current = new Map((request.result as WrongQuestion[]).map(q => [q.id, q]));
+      for (const [id, old] of baseline) {
+        const local = current.get(id);
+        if (!local || JSON.stringify({ ...local, capturedAt: local.capturedAt || local.createdAt }) !== old) continue;
+        if (remote.has(id)) store.put(remote.get(id)!); else store.delete(id);
+      }
+      for (const q of incoming) if (!baseline.has(q.id) && !current.has(q.id)) store.put(q);
+    };
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function permanentlyDeleteQuestion(id: string): Promise<void> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, 'readwrite');
@@ -59,12 +114,28 @@ export async function deleteQuestion(id: string): Promise<void> {
 export async function replaceAllQuestions(questions: WrongQuestion[], notify = true): Promise<void> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, 'readwrite');
+    const tx = db.transaction([STORE, 'recovery'], 'readwrite');
     const store = tx.objectStore(STORE);
-    store.clear();
-    questions.forEach((question) => store.put(question));
+    const old = store.getAll();
+    old.onsuccess = () => {
+      tx.objectStore('recovery').put(old.result, 'before-import');
+      store.clear();
+      questions.forEach((question) => store.put(question));
+    };
     tx.oncomplete = () => { db.close(); if (notify) notifyDataChanged('replace'); resolve(); };
     tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function restoreBeforeImport(): Promise<void> {
+  const db = await openDb();
+  return new Promise((resolve,reject)=> {
+    const tx=db.transaction([STORE,'recovery'],'readwrite');
+    const get=tx.objectStore('recovery').get('before-import');
+    get.onsuccess=()=>{if(!get.result){tx.abort();return;}const store=tx.objectStore(STORE);store.clear();for(const q of get.result)store.put(q);};
+    tx.oncomplete=()=>{db.close();notifyDataChanged('replace');resolve();};
+    tx.onabort=()=>reject(new Error('没有可恢复的导入快照'));
+    tx.onerror=()=>reject(tx.error);
   });
 }
 
