@@ -14,7 +14,7 @@ export default defineConfig({
       if(process.env.GITHUB_ACTIONS!=='true')return;
       for(const [name,file] of Object.entries(bundle)){
         const source=file.type==='chunk'?file.code:typeof file.source==='string'?file.source:'';
-        if(/sk-[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_]{20,}|gh[opusr]_[A-Za-z0-9]{30,}/.test(source))throw new Error(`公开构建发现疑似密钥，已停止发布：${name}`);
+        if(/(?<![A-Za-z0-9_-])(?:sk-[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_]{20,}|gh[opusr]_[A-Za-z0-9]{30,})/.test(source))throw new Error(`公开构建发现疑似密钥，已停止发布：${name}`);
       }
     },
   }],
