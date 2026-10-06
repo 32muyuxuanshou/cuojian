@@ -18,6 +18,7 @@ import { questionContext, questionImages } from '@/lib/materials';
 import { Inbox } from '@/components/inbox';
 import { matchesDate, captureDate } from '@/lib/capture';
 import { DEEPSEEK_MODEL } from '@/lib/deepseek-client-config';
+import {defaultAiSettings,loadAiSettings,aiBaseUrl} from '@/lib/ai-settings';
 import { requestDeepSeek } from '@/lib/deepseek-client';
 import { diagnoseWeaknesses } from '@/lib/learning-diagnosis';
 import { causeTypes, modules, type AiAnalysis, type AiSettings, type AiStudyDiagnosis, type GithubSyncSettings, type QuestionMessage, type ReviewCelebrationInput, type SyncStatus, type WrongQuestion } from '@/lib/models';
@@ -48,7 +49,7 @@ export function CuojianApp() {
   const [selectedId, setSelectedId] = useState<string>();
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [settings, setSettings] = useState<AiSettings>({ apiKey: '', model: DEEPSEEK_MODEL, thinkingMode: 'high' });
+  const [settings, setSettings] = useState<AiSettings>(defaultAiSettings);
   const [githubSync, setGithubSync] = useState<GithubSyncSettings>(defaultGithubSync);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({ state: 'disabled', message: '尚未配置 GitHub 同步。' });
   const [availableUpdate, setAvailableUpdate] = useState<AvailableUpdate>();
@@ -125,10 +126,7 @@ export function CuojianApp() {
   }
 
   useEffect(() => {
-    const savedSettings = localStorage.getItem('cuojian_deepseek');
-    if (savedSettings) {
-      try { const parsed = JSON.parse(savedSettings) as Partial<AiSettings>; queueMicrotask(() => setSettings({ apiKey: parsed.apiKey || '', model: DEEPSEEK_MODEL, thinkingMode: parsed.thinkingMode || 'high' })); } catch { /* ignore broken local setting */ }
-    }
+    queueMicrotask(()=>{const loaded=loadAiSettings(localStorage);setSettings(loaded);if(loaded.apiKey)try{localStorage.setItem('cuojian_ai',JSON.stringify(loaded));}catch{/* Preconfigured settings still work if storage is full. */}});
     let nextSync = defaultGithubSync;
     const savedSync = localStorage.getItem('cuojian_github_sync');
     if (savedSync) {
@@ -217,7 +215,7 @@ function Sidebar({ view, counts, navigate }: { view: View; counts: { due: number
       <NavItem icon={Target} label="学习统计" active={view === 'stats'} onClick={() => navigate('stats')} />
     </nav>
     <div className="mt-auto space-y-2">
-      <div className="rounded-2xl border border-[#dfd5c5] bg-[#fbf3e6] p-4 text-[#654b2d]"><div className="flex items-center gap-2 text-xs font-semibold"><Sparkles className="size-3.5" /> DeepSeek 只在需要时出现</div><p className="mt-2 text-xs leading-5 text-[#84694b]">自动整理标签，讲解由你主动发起。</p></div>
+      <div className="rounded-2xl border border-[#dfd5c5] bg-[#fbf3e6] p-4 text-[#654b2d]"><div className="flex items-center gap-2 text-xs font-semibold"><Sparkles className="size-3.5" /> AI 只在需要时出现</div><p className="mt-2 text-xs leading-5 text-[#84694b]">自动整理标签，讲解由你主动发起。</p></div>
       <Button variant="ghost" className={`h-10 w-full justify-start gap-3 px-3 ${view === 'settings' ? 'bg-muted text-foreground' : 'text-muted-foreground'}`} onClick={() => navigate('settings')}><Settings2 /> 设置与备份</Button>
     </div>
   </aside>;
@@ -323,18 +321,18 @@ function AddQuestion({ settings, initialQuestion, onCancel, onSaved }: { setting
     reader.readAsDataURL(file);
   }
   async function classify() {
-    if (!settings.apiKey) { setMessage('请先在“设置与备份”中填写 DeepSeek API Key。'); return; }
+    if (!settings.apiKey) { setMessage('请先在“设置与备份”中填写 AI API Key。'); return; }
     if (!image) { setMessage('请先选择题目图片。'); return; }
     setBusy(true); setMessage('');
     try {
       const data = await requestDeepSeek<ClassificationResult>({ ...settings, action: 'classify', imageDataUrls:[...(initialQuestion?.material?.images || []),image], question:initialQuestion ? questionContext(initialQuestion) : undefined });
       setForm((prev) => ({ ...prev, stem: data.stem || prev.stem, source: data.detectedSource || prev.source, sourceVerified: false, module: data.module || prev.module, topic: data.topic || prev.topic, tags: Array.isArray(data.tags) ? data.tags.join('、') : prev.tags, A: data.options?.A || prev.A, B: data.options?.B || prev.B, C: data.options?.C || prev.C, D: data.options?.D || prev.D }));
-      setMessage(data.uncertainties?.length ? `DeepSeek 有 ${data.uncertainties.length} 处不确定，请重点核对。` : '已完成识别和归类，请核对后保存。');
+      setMessage(data.uncertainties?.length ? `AI 有 ${data.uncertainties.length} 处不确定，请重点核对。` : '已完成识别和归类，请核对后保存。');
     } catch (error) { setMessage(error instanceof Error ? error.message : '归类失败'); }
     finally { setBusy(false); }
   }
   async function generateAnswerAnalysis() {
-    if (!settings.apiKey) { setMessage('请先在“设置与备份”中填写 DeepSeek API Key。'); return; }
+    if (!settings.apiKey) { setMessage('请先在“设置与备份”中填写 AI API Key。'); return; }
     if (!form.correctAnswer) { setMessage('请先由你确认正确答案，AI只生成解析。'); return; }
     if (!form.stem.trim() && !image) { setMessage('请先填写题干或上传题目图片。'); return; }
     setBusy(true); setMessage('');
@@ -363,7 +361,7 @@ function AddQuestion({ settings, initialQuestion, onCancel, onSaved }: { setting
       ...initialQuestion,
       id: initialQuestion?.id || crypto.randomUUID(), createdAt: initialQuestion?.createdAt || now, updatedAt: now, source: form.source.trim() || '未填写来源', sourceVerified: form.sourceVerified, stem: form.stem.trim(),
       options: Object.fromEntries((['A', 'B', 'C', 'D'] as const).filter((key) => form[key]).map((key) => [key, form[key]])),
-      correctAnswer: form.correctAnswer, answerSource: 'user', module: form.module, topic: form.topic, tags: form.tags.split(/[、,，]/).map((t) => t.trim()).filter(Boolean), imageDataUrl: image,
+      correctAnswer: form.correctAnswer, answerSource: !answerKeyChanged&&initialQuestion?.answerSource?initialQuestion.answerSource:'user', module: form.module, topic: form.topic, tags: form.tags.split(/[、,，]/).map((t) => t.trim()).filter(Boolean), imageDataUrl: image,
       status: answerKeyChanged ? 'learning' : initialQuestion?.status || 'learning', reviewLevel: answerKeyChanged ? 0 : initialQuestion?.reviewLevel || 0, nextReviewAt: answerKeyChanged ? now : initialQuestion?.nextReviewAt || now,
       correctReasoning: form.correctReasoning.trim() || undefined, answerAnalysisImageDataUrl: answerAnalysisImage, pitfall: form.pitfall.trim() || undefined, analysis: coreContentChanged && analysisDraft === initialQuestion?.analysis ? undefined : analysisDraft,
       capturedAt: initialQuestion?.capturedAt || initialQuestion?.createdAt || now,
@@ -376,15 +374,17 @@ function AddQuestion({ settings, initialQuestion, onCancel, onSaved }: { setting
     try { await saveQuestion(question); onSaved(question); } catch { setMessage('保存失败，请检查剩余空间后重试。'); }
   }
   return <><button onClick={onCancel} className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="size-4" /> 返回</button><PageHeader eyebrow={initialQuestion ? '修正档案' : '快速收录'} title={initialQuestion ? '编辑这道错题' : '录入一道错题'} description={initialQuestion ? '修改录入错误；原有复刷历史会保留。' : '先保存事实，详细讲解可以稍后再生成。'} compact />
+    <MaterialView material={initialQuestion?.material} />
+    {initialQuestion?.extractedNotes&&<div className="mt-4 rounded-xl border bg-muted p-4 text-sm"><strong>PDF中的原笔记</strong><p className="mt-2 whitespace-pre-wrap">{initialQuestion.extractedNotes}</p></div>}
     <div className="mt-7 grid gap-6 xl:grid-cols-[minmax(320px,.85fr)_minmax(0,1.15fr)]"><section className="rounded-[22px] border bg-card p-5"><h2 className="font-heading text-lg font-semibold">题目图片</h2><p className="mt-1 text-xs text-muted-foreground">图形、表格题请保留原图，建议先裁剪无关区域。</p><input aria-label="选择题目图片" ref={fileRef} hidden type="file" accept="image/*" onChange={(e) => void pickImage(e.target.files?.[0])} />
       {image ? <div className="relative mt-4 overflow-hidden rounded-2xl border bg-muted">{/* oxlint-disable-next-line next/no-img-element -- 本地 data URL 不适合图片优化器 */}<img src={image} alt="待录入题目" className="max-h-[520px] w-full object-contain" /><button type="button" className="absolute right-3 top-3 rounded-full bg-black/65 p-2 text-white" onClick={() => setImage(undefined)} aria-label="移除图片"><X className="size-4" /></button></div> : <button type="button" aria-label="选择题目截图或照片" onClick={() => fileRef.current?.click()} className="mt-4 grid min-h-64 w-full place-items-center rounded-2xl border border-dashed bg-muted/35 text-muted-foreground transition-colors hover:bg-muted"><span className="flex flex-col items-center gap-3"><span className="grid size-12 place-items-center rounded-2xl bg-card shadow-sm"><ImagePlus /></span><span className="text-sm font-medium text-foreground">选择题目截图或照片</span><span className="text-xs">PNG、JPG，最大 12 MB</span></span></button>}
-      <div className="mt-4 flex gap-2"><Button variant="outline" className="flex-1" onClick={() => fileRef.current?.click()}><FileImage /> {image ? '更换图片' : '选择图片'}</Button><Button className="flex-1" disabled={!image || busy} onClick={classify}>{busy ? <Loader2 className="animate-spin" /> : <Sparkles />} DeepSeek 识别归类</Button></div><p className="mt-3 text-[11px] leading-5 text-muted-foreground">点击识别后，这张图片会发送给 DeepSeek；不点击则始终只保存在本机。</p>{message && <p className="mt-3 rounded-xl bg-muted px-3 py-2 text-xs text-muted-foreground">{message}</p>}</section>
-      <section className="space-y-5 rounded-[22px] border bg-card p-5 sm:p-6"><Field label="来源" hint="DeepSeek 只能提供候选"><Input value={form.source} onChange={(e) => { update('source', e.target.value); setForm((prev) => ({ ...prev, sourceVerified: false })); }} placeholder="例如：2025 国考 · 地市级" className="h-10" /></Field><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.sourceVerified} onChange={(e) => setForm((prev) => ({ ...prev, sourceVerified: e.target.checked }))} className="size-4 accent-primary" /><span>我已核对来源</span></label><Field label="题干"><Textarea value={form.stem} onChange={(e) => update('stem', e.target.value)} placeholder="粘贴题干，或使用 DeepSeek 从图片中识别" className="min-h-28" /></Field>
+      <div className="mt-4 flex gap-2"><Button variant="outline" className="flex-1" onClick={() => fileRef.current?.click()}><FileImage /> {image ? '更换图片' : '选择图片'}</Button><Button className="flex-1" disabled={!image || busy} onClick={classify}>{busy ? <Loader2 className="animate-spin" /> : <Sparkles />} AI 识别归类</Button></div><p className="mt-3 text-[11px] leading-5 text-muted-foreground">点击识别后，这张图片会发送给当前 AI 服务；不点击则始终只保存在本机。</p>{message && <p className="mt-3 rounded-xl bg-muted px-3 py-2 text-xs text-muted-foreground">{message}</p>}</section>
+      <section className="space-y-5 rounded-[22px] border bg-card p-5 sm:p-6"><Field label="来源" hint="AI 只能提供候选"><Input value={form.source} onChange={(e) => { update('source', e.target.value); setForm((prev) => ({ ...prev, sourceVerified: false })); }} placeholder="例如：2025 国考 · 地市级" className="h-10" /></Field><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.sourceVerified} onChange={(e) => setForm((prev) => ({ ...prev, sourceVerified: e.target.checked }))} className="size-4 accent-primary" /><span>我已核对来源</span></label><Field label="题干"><Textarea value={form.stem} onChange={(e) => update('stem', e.target.value)} placeholder="粘贴题干，或使用 AI 从图片中识别" className="min-h-28" /></Field>
       <div className="grid gap-3 sm:grid-cols-2">{(['A', 'B', 'C', 'D'] as const).map((key) => <Field key={key} label={`选项 ${key}`}><Input value={form[key]} onChange={(e) => update(key, e.target.value)} /></Field>)}</div>
       <div className="grid gap-4 sm:grid-cols-2"><Field label="我的选项"><select className={selectClass} value={form.myAnswer} onChange={(e) => update('myAnswer', e.target.value)}><option value="">请选择</option>{['A', 'B', 'C', 'D'].map((v) => <option key={v}>{v}</option>)}</select></Field><Field label="正确答案" hint="由官方答案或你本人确认"><select className={selectClass} value={form.correctAnswer} onChange={(e) => update('correctAnswer', e.target.value)}><option value="">请选择</option>{['A', 'B', 'C', 'D'].map((v) => <option key={v}>{v}</option>)}</select></Field></div>
       <div className="grid gap-4 sm:grid-cols-2"><Field label="大模块" hint="可选或自定义"><Input list="module-options" value={form.module} onChange={e=>{update('module',e.target.value);update('topic','');}} placeholder="待分类" /><datalist id="module-options">{modules.slice(1).map(v=><option key={v} value={v} />)}</datalist></Field><Field label="细分考点" hint="可选或自定义"><Input list="topic-options" value={form.topic} onChange={e=>update('topic',e.target.value)} placeholder="待分类" /><datalist id="topic-options">{topics.map(v=><option key={v} value={v} />)}</datalist></Field></div>
       <Field label="标签" hint="用逗号或顿号分隔"><Input value={form.tags} onChange={(e) => update('tags', e.target.value)} placeholder="例如：基期量、增长率、截位直除" /></Field><Field label="错因类型"><select className={selectClass} value={form.causeType} onChange={(e) => update('causeType', e.target.value)}><option value="">暂未确认</option>{causeTypes.map((v) => <option key={v}>{v}</option>)}</select></Field><Field label="具体个人错因" hint="这是你的判断，AI不会替你填写"><Textarea value={form.personalCause} onChange={(e) => update('personalCause', e.target.value)} placeholder="我当时为什么会选错？" className="min-h-20" /></Field>
-      <div className="rounded-[18px] border border-[#e2d8ca] bg-[#fffaf4] p-4 sm:p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="font-heading font-semibold">正确答案解析 <span className="font-sans text-xs font-normal text-muted-foreground">可选</span></h3><p className="mt-1 text-xs leading-5 text-muted-foreground">可以留空、手写、上传官方解析图片，或让 DeepSeek 根据题目和选项生成草稿。</p></div><Button type="button" variant="outline" size="sm" disabled={busy} onClick={generateAnswerAnalysis}>{busy ? <Loader2 className="animate-spin" /> : <Sparkles />} AI分析选项</Button></div><div className="mt-4"><Textarea value={form.correctReasoning} onChange={(e) => update('correctReasoning', e.target.value)} placeholder="输入官方解析或你认可的正确思路，也可以留空" className="min-h-28 bg-card" /></div><input aria-label="选择正确答案解析图片" ref={analysisFileRef} hidden type="file" accept="image/*" onChange={(e) => void pickAnswerAnalysisImage(e.target.files?.[0])} />{answerAnalysisImage ? <div className="relative mt-3 overflow-hidden rounded-xl border bg-card">{/* oxlint-disable-next-line next/no-img-element -- 本地 data URL 不适合图片优化器 */}<img src={answerAnalysisImage} alt="正确答案解析" className="max-h-[360px] w-full object-contain" /><button type="button" aria-label="移除解析图片" onClick={() => setAnswerAnalysisImage(undefined)} className="absolute right-2 top-2 rounded-full bg-black/65 p-2 text-white"><X className="size-4" /></button></div> : null}<Button type="button" variant="ghost" size="sm" className="mt-2" onClick={() => analysisFileRef.current?.click()}><ImagePlus /> {answerAnalysisImage ? '更换解析图片' : '上传解析图片'}</Button>{analysisDraft && <p className="mt-2 text-xs text-[#8a5a35]">已生成 AI 草稿，保存前仍可修改。AI没有更改你确认的正确答案。</p>}</div>
+      <div className="rounded-[18px] border border-[#e2d8ca] bg-[#fffaf4] p-4 sm:p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="font-heading font-semibold">正确答案解析 <span className="font-sans text-xs font-normal text-muted-foreground">可选</span></h3><p className="mt-1 text-xs leading-5 text-muted-foreground">可以留空、手写、上传官方解析图片，或让 AI 根据题目和选项生成草稿。</p></div><Button type="button" variant="outline" size="sm" disabled={busy} onClick={generateAnswerAnalysis}>{busy ? <Loader2 className="animate-spin" /> : <Sparkles />} AI分析选项</Button></div><div className="mt-4"><Textarea value={form.correctReasoning} onChange={(e) => update('correctReasoning', e.target.value)} placeholder="输入官方解析或你认可的正确思路，也可以留空" className="min-h-28 bg-card" /></div><input aria-label="选择正确答案解析图片" ref={analysisFileRef} hidden type="file" accept="image/*" onChange={(e) => void pickAnswerAnalysisImage(e.target.files?.[0])} />{answerAnalysisImage ? <div className="relative mt-3 overflow-hidden rounded-xl border bg-card">{/* oxlint-disable-next-line next/no-img-element -- 本地 data URL 不适合图片优化器 */}<img src={answerAnalysisImage} alt="正确答案解析" className="max-h-[360px] w-full object-contain" /><button type="button" aria-label="移除解析图片" onClick={() => setAnswerAnalysisImage(undefined)} className="absolute right-2 top-2 rounded-full bg-black/65 p-2 text-white"><X className="size-4" /></button></div> : null}<Button type="button" variant="ghost" size="sm" className="mt-2" onClick={() => analysisFileRef.current?.click()}><ImagePlus /> {answerAnalysisImage ? '更换解析图片' : '上传解析图片'}</Button>{analysisDraft && <p className="mt-2 text-xs text-[#8a5a35]">已生成 AI 草稿，保存前仍可修改。AI没有更改你确认的正确答案。</p>}</div>
       <Field label="避坑提醒"><Textarea value={form.pitfall} onChange={(e) => update('pitfall', e.target.value)} placeholder="下次看到什么信号，要避免什么错误？" className="min-h-20" /></Field>{message && <p className="rounded-xl bg-muted px-3 py-2 text-xs text-muted-foreground">{message}</p>}
       <div className="flex justify-end gap-2 border-t pt-5"><Button variant="outline" onClick={onCancel}>取消</Button><Button onClick={submit}><Check /> {initialQuestion ? '保存修改' : '保存到错题库'}</Button></div></section></div></>;
 }
@@ -413,7 +413,7 @@ function ReviewSession({ mode, questions, settings, mastery, isTodaySession, onB
     const cacheKey = `cuojian_lamb_celebration_${day}`;
     const cached = localStorage.getItem(cacheKey);
     if (cached) { queueMicrotask(() => setCelebration(cached)); return; }
-    if (!settings.apiKey) { queueMicrotask(() => setCelebrationError('请先在设置中填写 DeepSeek API Key，才能生成今天的小羊寄语。')); return; }
+    if (!settings.apiKey) { queueMicrotask(() => setCelebrationError('请先在设置中填写 AI API Key，才能生成今天的小羊寄语。')); return; }
     const correct = results.filter((result) => result.correct).length;
     const reviewResult: ReviewCelebrationInput = {
       mode,
@@ -460,7 +460,7 @@ function ReviewSession({ mode, questions, settings, mastery, isTodaySession, onB
   if (!queue.length) return <><button onClick={onBack} className="flex items-center gap-2 text-sm text-muted-foreground"><ArrowLeft className="size-4" /> 返回今日复习</button><Empty title="没有可复习的错题" body="录入错题后再来练习。" /></>;
   if (!question) {
     const correct = results.filter((result) => result.correct).length;
-    return <><button onClick={onBack} className="flex items-center gap-2 text-sm text-muted-foreground"><ArrowLeft className="size-4" /> 返回今日复习</button><div className="mx-auto mt-10 max-w-2xl rounded-[28px] border bg-card p-7 text-center shadow-[0_18px_60px_rgba(28,42,47,.08)] sm:p-10"><span className="mx-auto grid size-12 place-items-center rounded-2xl bg-[#fff0e9] text-[#c7684b]"><Sparkles className="size-6" /></span><h1 className="mt-5 font-heading text-2xl font-semibold">本轮完成</h1><p className="mt-2 text-sm text-muted-foreground">已完成 {queue.length} 道题，{mode === 'practice' ? `答对 ${correct} 道` : `想起 ${correct} 道`}。</p>{isTodaySession && <div className="mt-7 rounded-[20px] bg-[#fff8ef] px-5 py-6 text-left"><p className="text-xs font-semibold tracking-wide text-[#b16b39]">今日的小羊寄语</p>{celebrationBusy ? <p className="mt-3 flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> DeepSeek 正在轻轻写一句话……</p> : celebration ? <p className="mt-3 font-heading text-lg leading-8 text-[#654b2d]">{celebration}</p> : <p className="mt-3 text-sm leading-6 text-muted-foreground">{celebrationError || '正在准备今天的寄语……'}</p>}</div>}<Button className="mt-7" onClick={onBack}>返回今日复习</Button></div></>;
+    return <><button onClick={onBack} className="flex items-center gap-2 text-sm text-muted-foreground"><ArrowLeft className="size-4" /> 返回今日复习</button><div className="mx-auto mt-10 max-w-2xl rounded-[28px] border bg-card p-7 text-center shadow-[0_18px_60px_rgba(28,42,47,.08)] sm:p-10"><span className="mx-auto grid size-12 place-items-center rounded-2xl bg-[#fff0e9] text-[#c7684b]"><Sparkles className="size-6" /></span><h1 className="mt-5 font-heading text-2xl font-semibold">本轮完成</h1><p className="mt-2 text-sm text-muted-foreground">已完成 {queue.length} 道题，{mode === 'practice' ? `答对 ${correct} 道` : `想起 ${correct} 道`}。</p>{isTodaySession && <div className="mt-7 rounded-[20px] bg-[#fff8ef] px-5 py-6 text-left"><p className="text-xs font-semibold tracking-wide text-[#b16b39]">今日的小羊寄语</p>{celebrationBusy ? <p className="mt-3 flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> AI 正在轻轻写一句话……</p> : celebration ? <p className="mt-3 font-heading text-lg leading-8 text-[#654b2d]">{celebration}</p> : <p className="mt-3 text-sm leading-6 text-muted-foreground">{celebrationError || '正在准备今天的寄语……'}</p>}</div>}<Button className="mt-7" onClick={onBack}>返回今日复习</Button></div></>;
   }
 
   return <><div className="flex items-center justify-between"><button onClick={onBack} className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="size-4" /> 退出{mode === 'practice' ? '写题' : '复习'}</button><span className="text-xs text-muted-foreground">{index + 1} / {queue.length}</span></div><Progress value={(index + 1) / queue.length * 100} className="mt-4 h-1.5" />
@@ -485,7 +485,7 @@ function QuestionDetail({ question, questions, settings, onBack, onEdit, onChang
   const [chatBusy, setChatBusy] = useState(false);
   const latestCause = question.attempts[question.attempts.length - 1];
   async function analyze() {
-    if (!settings.apiKey) return setMessage('请先在设置中填写 DeepSeek API Key。');
+    if (!settings.apiKey) return setMessage('请先在设置中填写 AI API Key。');
     setBusy(true); setMessage('');
     const history = questions.filter((q) => q.id !== question.id && !q.inbox && !q.isDemo && (q.topic === question.topic || q.tags.some(t => question.tags.includes(t)))).slice(0, 5).map((q) => ({ id: q.id, topic: q.topic, cause: q.attempts.at(-1)?.personalCause, results: q.attempts.map((a) => a.correct) }));
     try {
@@ -498,7 +498,7 @@ function QuestionDetail({ question, questions, settings, onBack, onEdit, onChang
   async function sendChat() {
     const prompt = chatInput.trim();
     if (!prompt || chatBusy) return;
-    if (!settings.apiKey) return setMessage('请先在设置中填写 DeepSeek API Key。');
+    if (!settings.apiKey) return setMessage('请先在设置中填写 AI API Key。');
     const now = new Date().toISOString();
     const userMessage: QuestionMessage = { id: crypto.randomUUID(), role: 'user', content: prompt, createdAt: now };
     const conversation = [...(question.conversation || []), userMessage];
@@ -507,7 +507,7 @@ function QuestionDetail({ question, questions, settings, onBack, onEdit, onChang
     try {
       const shouldSendImage = Boolean(question.imageDataUrl && (!(question.conversation?.length) || /图|图片|图形|选项|细节/.test(prompt)));
       const result = await requestDeepSeek<{ reply?: string; summary?: string }>({ ...settings, action: 'chat', imageDataUrls: (question.material || shouldSendImage) ? questionImages(question).map(i=>i.dataUrl) : [], question: { ...questionContext(question), imageRoles:questionImages(question).map(i=>i.role), stem: question.stem, options: question.options, correctAnswer: question.correctAnswer, answerSource: question.answerSource, module: question.module, topic: question.topic, tags: question.tags, personalCause: latestCause?.personalCause, conversationSummary: question.analysisStale ? undefined : question.conversationSummary, analysisStale:question.analysisStale }, history, messages: (question.analysisStale ? [userMessage] : conversation.slice(-10)).map(({ role, content }) => ({ role, content })) });
-      if (!result.reply) throw new Error('DeepSeek 没有返回有效回答');
+      if (!result.reply) throw new Error('AI 没有返回有效回答');
       const assistantMessage: QuestionMessage = { id: crypto.randomUUID(), role: 'assistant', content: result.reply, createdAt: new Date().toISOString() };
       if (!await saveIfUnchanged({ ...question, conversation: [...conversation, assistantMessage], conversationSummary: result.summary || question.conversationSummary, updatedAt: assistantMessage.createdAt }, question.updatedAt)) setMessage('题目已被修改，本次回答未覆盖新数据。');
       onChanged();
@@ -523,14 +523,14 @@ function QuestionDetail({ question, questions, settings, onBack, onEdit, onChang
   return <><button onClick={onBack} className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="size-4" /> 返回</button><div className="mt-5 flex flex-wrap items-start justify-between gap-4"><div><div className="flex flex-wrap gap-2"><Badge variant="secondary">{question.module}</Badge><Badge variant="outline">{question.topic}</Badge>{question.isDemo && <Badge variant="outline">示例数据</Badge>}</div><h1 className="mt-3 max-w-4xl font-heading text-2xl font-semibold">错题详情</h1></div><div className="flex flex-wrap gap-2"><Button variant="outline" onClick={onEdit}><PencilLine /> 编辑</Button><Button variant="outline" onClick={toggleMastered}>{question.status === 'mastered' ? <RotateCcw /> : <Check />}{question.status === 'mastered' ? '恢复复习' : '标为掌握'}</Button><Button variant="destructive" onClick={remove}><Trash2 /> 删除</Button></div></div>
     <div className="mt-4"><Button variant="outline" onClick={onMaterialSet}>{question.material ? '编辑共享资料 / 添加同资料小题' : '添加共享资料 / 扩展为资料题组'}</Button>{question.material && <p className="mt-2 text-sm">{question.material.title} · 小题 {question.subquestionNumber} · 共 {questions.filter(q=>q.material?.id===question.material?.id).length} 道</p>}</div><MaterialView material={question.material} />
     <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]"><section className="space-y-5"><div className="rounded-[22px] border bg-card p-5 sm:p-7"><div className="flex items-center justify-between text-xs text-muted-foreground"><span>{question.source}{!question.sourceVerified ? ' · 来源待核对' : ''}</span><span>已复刷 {Math.max(0, question.attempts.length - 1)} 次</span></div>{question.imageDataUrl && <>{/* oxlint-disable-next-line next/no-img-element -- 本地 data URL 不适合图片优化器 */}<img src={question.imageDataUrl} alt="题目原图" className="mt-5 max-h-[460px] w-full rounded-xl border bg-white object-contain" /></>}{question.extraImages?.filter(i=>i.role!=='analysis').map(i=><img key={i.id} src={i.dataUrl} alt="本题续图 / 材料" className="mt-3 w-full rounded-xl border object-contain" />)}<p className="mt-5 whitespace-pre-wrap text-[16px] leading-8">{question.stem}</p><div className="mt-5 grid gap-3">{Object.entries(question.options).map(([key, value]) => <div key={key} className={`flex items-start gap-3 rounded-xl border px-4 py-3 ${key === question.correctAnswer ? 'border-[#77a084] bg-[#edf6ef]' : 'bg-card'}`}><span className="grid size-7 shrink-0 place-items-center rounded-full border text-sm font-semibold">{key}</span><span className="pt-0.5 text-sm leading-6">{value}</span></div>)}</div>{message && <p className="mt-4 rounded-xl bg-muted px-4 py-3 text-sm text-muted-foreground">{message}</p>}</div>
-      <div className="rounded-[22px] border bg-card p-5 sm:p-7"><div className="grid gap-4 sm:grid-cols-2"><Info label="正确答案" value={question.correctAnswer} /><Info label="答案依据" value={question.answerSource === 'official' ? '官方答案' : question.answerSource === 'user' ? '用户确认' : 'AI推测，待确认'} /><Info label="首次错误" value={question.attempts[0]?.answer || '未记录'} /><Info label="个人错因" value={latestCause?.personalCause || latestCause?.causeType || '未填写'} /></div>{question.correctReasoning && <AnalysisItem title="正确答案解析" body={question.correctReasoning} />}{question.extraImages?.filter(i=>i.role==='analysis').map(i=><AnswerAnalysisImage key={i.id} src={i.dataUrl} />)}{question.answerAnalysisImageDataUrl && <AnswerAnalysisImage src={question.answerAnalysisImageDataUrl} />}{question.pitfall && <AnalysisItem title="我记录的避坑提醒" body={question.pitfall} />}</div>
+      <div className="rounded-[22px] border bg-card p-5 sm:p-7"><div className="grid gap-4 sm:grid-cols-2"><Info label="正确答案" value={question.correctAnswer} /><Info label="答案依据" value={question.answerSource === 'official' ? '官方答案' : question.answerSource === 'document' ? 'PDF卷面识别' : question.answerSource === 'user' ? '用户确认' : 'AI推测，待确认'} /><Info label="首次错误" value={question.attempts[0]?.answer || '未记录'} /><Info label="个人错因" value={latestCause?.personalCause || latestCause?.causeType || '未填写'} />{question.pdfSource&&<Info label="PDF原文" value={`${question.pdfSource.name} · 第${question.pdfSource.pages.join('、')}页`} />}{question.answerEvidence&&<Info label="答案识别依据" value={question.answerEvidence} />}</div>{question.extractedNotes&&<AnalysisItem title="从PDF提取的笔记" body={question.extractedNotes} />}{question.correctReasoning && <AnalysisItem title="正确答案解析" body={question.correctReasoning} />}{question.extraImages?.filter(i=>i.role==='analysis').map(i=><AnswerAnalysisImage key={i.id} src={i.dataUrl} />)}{question.answerAnalysisImageDataUrl && <AnswerAnalysisImage src={question.answerAnalysisImageDataUrl} />}{question.pitfall && <AnalysisItem title="我记录的避坑提醒" body={question.pitfall} />}</div>
       {question.analysisStale && <p className="rounded-xl bg-muted p-3 text-sm">题目或答案已修改，旧解析和会话结论需重新核对。</p>}{question.analysis && <AnalysisBlock analysis={question.analysis} />}
       <div className="rounded-[22px] border bg-card p-5 sm:p-7"><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-heading text-lg font-semibold">继续问这道题</h2><p className="mt-1 text-xs text-muted-foreground">会话只保存在本题档案中；回答会结合相关 Skill 和有证据的同类错题。</p></div>{Boolean(question.conversation?.length) && <Button variant="ghost" size="sm" onClick={() => void resetConversation()}>重置会话</Button>}</div>{question.conversation?.length ? <div className="mt-5 space-y-3">{question.conversation.map((item) => <div key={item.id} className={`max-w-[90%] rounded-2xl px-4 py-3 text-sm leading-7 ${item.role === 'user' ? 'ml-auto bg-primary text-primary-foreground' : 'bg-muted text-foreground'}`}><p className="whitespace-pre-wrap">{item.content}</p><p className={`mt-1 text-[10px] ${item.role === 'user' ? 'text-primary-foreground/60' : 'text-muted-foreground'}`}>{formatDate(item.createdAt)}</p></div>)}</div> : <p className="mt-5 rounded-2xl bg-muted px-4 py-4 text-sm text-muted-foreground">分析后继续追问，或者直接问“为什么不能选 B？”“我以前错过类似题吗？”</p>}<div className="mt-5 flex items-end gap-2"><Textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} placeholder="继续追问这道题……" className="min-h-20 resize-none" onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendChat(); } }} /><Button aria-label="发送追问" className="h-11 w-11 shrink-0 p-0" disabled={!chatInput.trim() || chatBusy} onClick={() => void sendChat()}>{chatBusy ? <Loader2 className="animate-spin" /> : <Send />}</Button></div></div></section>
       <aside className="space-y-4"><div className="rounded-[22px] border bg-card p-5"><h2 className="font-heading font-semibold">标签</h2><div className="mt-3 flex flex-wrap gap-2">{question.tags.length ? question.tags.map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>) : <span className="text-sm text-muted-foreground">暂无标签</span>}</div></div><div className="rounded-[22px] border bg-card p-5"><h2 className="font-heading font-semibold">复习轨迹</h2><div className="mt-4 space-y-4">{question.attempts.map((attempt, i) => <div key={attempt.id} className="flex gap-3"><span className={`mt-1 size-2.5 rounded-full ${attempt.correct ? 'bg-[#4f8562]' : 'bg-[#d65c3a]'}`} /><div><p className="text-sm font-medium">{i === 0 ? '首次作答' : `第 ${i} 次复刷`} · {attempt.answer || '未记录'} · {attempt.correct ? '正确' : '错误'}</p><p className="mt-1 text-xs text-muted-foreground">{formatDate(attempt.answeredAt)}{attempt.causeType ? ` · ${attempt.causeType}` : ''}</p></div></div>)}</div></div>
-      <div className="rounded-[22px] bg-[#263b43] p-5 text-white"><div className="flex items-center gap-2 text-sm font-semibold text-[#f2c590]"><Sparkles className="size-4" /> 按需讲解</div><p className="mt-3 text-sm leading-6 text-white/70">点击后会把本题、原图和最多 5 道同类历史摘要发送给 DeepSeek；它不会修改正确答案。</p><Button className="mt-4 w-full bg-white text-[#263b43] hover:bg-white/90" disabled={busy} onClick={analyze}>{busy ? <Loader2 className="animate-spin" /> : <Sparkles />}{question.analysis ? '重新分析' : '分析这道题'}</Button></div></aside></div></>;
+      <div className="rounded-[22px] bg-[#263b43] p-5 text-white"><div className="flex items-center gap-2 text-sm font-semibold text-[#f2c590]"><Sparkles className="size-4" /> 按需讲解</div><p className="mt-3 text-sm leading-6 text-white/70">点击后会把本题、原图和最多 5 道同类历史摘要发送给当前 AI 服务；它不会修改正确答案。</p><Button className="mt-4 w-full bg-white text-[#263b43] hover:bg-white/90" disabled={busy} onClick={analyze}>{busy ? <Loader2 className="animate-spin" /> : <Sparkles />}{question.analysis ? '重新分析' : '分析这道题'}</Button></div></aside></div></>;
 }
 
-function AnalysisBlock({ analysis }: { analysis: AiAnalysis }) { return <div className="rounded-[22px] border border-[#e2d2bd] bg-[#fffaf1] p-5 sm:p-7"><div className="flex items-center justify-between"><h2 className="flex items-center gap-2 font-heading text-lg font-semibold"><Sparkles className="size-5 text-[#b16b39]" /> DeepSeek 分析</h2><Badge variant="outline">AI 草稿 · 请核对</Badge></div><p className="mt-4 text-sm leading-7">{analysis.summary}</p><AnalysisItem title="正确思路" body={analysis.correctReasoning} /><AnalysisItem title="我的错误" body={analysis.myErrorDiagnosis} />{analysis.optionAnalysis && <AnalysisItem title="选项比较" body={analysis.optionAnalysis} />}<AnalysisItem title="避坑提醒" body={analysis.pitfall} />{analysis.historyInsight && <AnalysisItem title="历史对照" body={analysis.historyInsight} />}</div>; }
+function AnalysisBlock({ analysis }: { analysis: AiAnalysis }) { return <div className="rounded-[22px] border border-[#e2d2bd] bg-[#fffaf1] p-5 sm:p-7"><div className="flex items-center justify-between"><h2 className="flex items-center gap-2 font-heading text-lg font-semibold"><Sparkles className="size-5 text-[#b16b39]" /> AI 分析</h2><Badge variant="outline">AI 草稿 · 请核对</Badge></div><p className="mt-4 text-sm leading-7">{analysis.summary}</p><AnalysisItem title="正确思路" body={analysis.correctReasoning} /><AnalysisItem title="我的错误" body={analysis.myErrorDiagnosis} />{analysis.optionAnalysis && <AnalysisItem title="选项比较" body={analysis.optionAnalysis} />}<AnalysisItem title="避坑提醒" body={analysis.pitfall} />{analysis.historyInsight && <AnalysisItem title="历史对照" body={analysis.historyInsight} />}</div>; }
 
 function Stats({ questions, settings, onOpen, onStart }: { questions: WrongQuestion[]; settings: AiSettings; onOpen: (id: string) => void; onStart: (mode: 'practice' | 'review', questions: WrongQuestion[]) => void }) {
   const [days, setDays] = useState<7 | 30 | 90 | 'all'>(30);
@@ -548,7 +548,7 @@ function Stats({ questions, settings, onOpen, onStart }: { questions: WrongQuest
   const reliableCount = diagnoses.filter((item) => item.evidenceLevel !== '待观察').length;
 
   async function generateAiReport() {
-    if (!settings.apiKey) return setMessage('DeepSeek API 尚未配置。');
+    if (!settings.apiKey) return setMessage('AI API 尚未配置。');
     if (!diagnoses.length) return setMessage('还没有足够的错题记录可以分析。');
     setAiBusy(true); setMessage('');
     const top = diagnoses.slice(0, 3);
@@ -567,14 +567,14 @@ function Stats({ questions, settings, onOpen, onStart }: { questions: WrongQuest
           })),
         },
       });
-      if (!result.summary || !Array.isArray(result.priorities)) throw new Error('DeepSeek 没有返回完整诊断');
+      if (!result.summary || !Array.isArray(result.priorities)) throw new Error('AI 没有返回完整诊断');
       setAiReport(result);
     } catch (error) { setMessage(error instanceof Error ? error.message : '诊断生成失败'); }
     finally { setAiBusy(false); }
   }
 
   return <>
-    <PageHeader eyebrow="学习反馈" title="学习诊断" description="本地程序计算证据和薄弱分；DeepSeek 只在你点击时解释并制定计划。" />
+    <PageHeader eyebrow="学习反馈" title="学习诊断" description="本地程序计算证据和薄弱分；AI 只在你点击时解释并制定计划。" />
     <div className="mt-6 flex flex-wrap gap-3 rounded-[18px] border bg-card p-4">
       <div className="flex flex-wrap gap-2">{([7, 30, 90, 'all'] as const).map((value) => <button key={value} onClick={() => setDays(value)} className={`rounded-full border px-3 py-1.5 text-xs ${days === value ? 'border-primary bg-primary text-primary-foreground' : 'bg-background text-muted-foreground'}`}>{value === 'all' ? '全部时间' : `近 ${value} 天`}</button>)}</div>
       <select aria-label="按来源筛选诊断" className={`${selectClass} ml-auto w-auto min-w-40`} value={source} onChange={(event) => setSource(event.target.value)}><option value="">全部来源</option>{sources.map((value) => <option key={value}>{value}</option>)}</select>
@@ -601,7 +601,7 @@ function Stats({ questions, settings, onOpen, onStart }: { questions: WrongQuest
         }) : <Empty title="还没有可诊断的数据" body="录入并复刷错题后，这里会出现有证据的薄弱点。" />}
       </section>
       <aside className="space-y-4">
-        <div className="rounded-[22px] bg-[#263b43] p-5 text-white"><div className="flex items-center gap-2 text-sm font-semibold text-[#f2c590]"><Sparkles className="size-4" /> DeepSeek + 花生十三</div><p className="mt-3 text-sm leading-6 text-white/70">AI只能解释上面的本地统计，并将证据转成可执行训练；不会修改薄弱分。</p><Button className="mt-4 w-full bg-white text-[#263b43] hover:bg-white/90" disabled={aiBusy || !diagnoses.length} onClick={() => void generateAiReport()}>{aiBusy ? <Loader2 className="animate-spin" /> : <Sparkles />} {aiReport ? '重新生成加强建议' : '分析我的薄弱点'}</Button></div>
+        <div className="rounded-[22px] bg-[#263b43] p-5 text-white"><div className="flex items-center gap-2 text-sm font-semibold text-[#f2c590]"><Sparkles className="size-4" /> AI + 花生十三</div><p className="mt-3 text-sm leading-6 text-white/70">AI只能解释上面的本地统计，并将证据转成可执行训练；不会修改薄弱分。</p><Button className="mt-4 w-full bg-white text-[#263b43] hover:bg-white/90" disabled={aiBusy || !diagnoses.length} onClick={() => void generateAiReport()}>{aiBusy ? <Loader2 className="animate-spin" /> : <Sparkles />} {aiReport ? '重新生成加强建议' : '分析我的薄弱点'}</Button></div>
         {message && <p className="rounded-xl bg-muted px-4 py-3 text-sm text-muted-foreground">{message}</p>}
         {aiReport && <div className="rounded-[22px] border border-[#e2d2bd] bg-[#fffaf1] p-5"><h2 className="font-heading text-lg font-semibold">加强建议</h2><p className="mt-3 text-sm leading-7">{aiReport.summary}</p><div className="mt-5 space-y-5">{aiReport.priorities.map((priority, index) => <section key={`${priority.scope}-${index}`} className="border-t border-[#e8dccb] pt-4"><div className="flex items-center gap-2"><span className="grid size-6 place-items-center rounded-full bg-[#263b43] text-xs text-white">{index + 1}</span><h3 className="font-semibold">{priority.scope}</h3></div><p className="mt-2 text-sm leading-6 text-[#5e5145]">{priority.reason}</p>{priority.evidence?.length > 0 && <p className="mt-2 text-xs leading-5 text-muted-foreground">证据：{priority.evidence.join('；')}</p>}<div className="mt-3 space-y-2">{priority.actions?.map((action, actionIndex) => <div key={`${action.title}-${actionIndex}`} className="rounded-xl bg-card p-3 text-sm"><strong>{action.title}</strong><p className="mt-1 leading-6 text-muted-foreground">{action.detail}</p><p className="mt-1 text-xs text-[#7a5835]">达标：{action.successCriteria}</p></div>)}</div></section>)}</div>{aiReport.caution && <p className="mt-4 rounded-xl bg-card px-3 py-2 text-xs leading-5 text-muted-foreground">{aiReport.caution}</p>}</div>}
       </aside>
@@ -630,18 +630,28 @@ function Settings({ settings, setSettings, githubSync, setGithubSync, syncStatus
   const [syncDraft, setSyncDraft] = useState(githubSync);
   const [message, setMessage] = useState('');
   const [autoUpdate, setAutoUpdate] = useState(() => typeof window === 'undefined' || localStorage.getItem('cuojian_auto_update') !== 'false');
+  const [testing,setTesting]=useState(false);
   const importRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => setDraft(settings), [settings]);
   useEffect(() => setSyncDraft(githubSync), [githubSync]);
 
   function saveAi() {
-    const next = { apiKey: draft.apiKey.trim(), model: DEEPSEEK_MODEL, thinkingMode: draft.thinkingMode };
-    localStorage.setItem('cuojian_deepseek', JSON.stringify(next));
+    const next = {...draft,apiKey:draft.apiKey.trim(),model:draft.model.trim()};
+    try{aiBaseUrl(next);}catch(error){setMessage(error instanceof Error?error.message:'API地址无效。');return;}
+    if(!next.model){setMessage('请填写模型名称。');return;}
+    localStorage.setItem('cuojian_ai', JSON.stringify(next));
     setSettings(next);
     setDraft(next);
-    setMessage('DeepSeek 设置已保存在当前设备。');
+    setMessage('AI 设置已保存在当前设备。');
   }
+  function switchProvider(provider:'deepseek'|'openai') {
+    let profiles:Record<string,AiSettings>={};try{profiles=JSON.parse(localStorage.getItem('cuojian_ai_profiles')||'{}');}catch{/* Recover empty profiles. */}
+    profiles[draft.provider||'deepseek']=draft;localStorage.setItem('cuojian_ai_profiles',JSON.stringify(profiles));
+    const legacy=localStorage.getItem('cuojian_deepseek');let old:Partial<AiSettings>={};if(legacy)try{old=JSON.parse(legacy);}catch{/* No legacy settings. */}
+    setDraft(profiles[provider]||(provider==='openai'?{...defaultAiSettings(),provider,baseUrl:'https://api.lingxiaihub.com',model:'gpt-5.5',transport:'responses'}:{provider,baseUrl:'https://api.deepseek.com',apiKey:old.apiKey||'',model:DEEPSEEK_MODEL,thinkingMode:draft.thinkingMode,transport:'chat'}));
+  }
+  async function testAi(){setTesting(true);setMessage('正在测试连接…');try{await requestDeepSeek({...draft,action:'test',thinkingMode:'disabled'});setMessage(`连接成功：${draft.model}。`);}catch(error){setMessage(error instanceof Error?error.message:'连接失败。');}finally{setTesting(false);}}
   function saveSync() {
     const next = { ...syncDraft, owner: syncDraft.owner.trim(), dataRepo: syncDraft.dataRepo.trim(), branch: syncDraft.branch.trim() || 'main', token: syncDraft.token.trim() };
     localStorage.setItem('cuojian_github_sync', JSON.stringify(next));
@@ -662,15 +672,18 @@ function Settings({ settings, setSettings, githubSync, setGithubSync, syncStatus
 
   return <>
     <Button variant="outline" onClick={async()=>{if(!confirm('恢复最近一次导入前的数据？导入后的修改会被替换，请先导出当前备份。'))return;try{await restoreBeforeImport();onImported();setMessage('已恢复导入前快照');}catch(e){setMessage(e instanceof Error?e.message:'恢复失败');}}}>恢复导入前快照</Button>
-    <PageHeader eyebrow="本机设置" title="DeepSeek、同步与更新" description="错题仍以本机为主；GitHub 只保存加密副本，软件更新不会覆盖学习数据。" />
+    <PageHeader eyebrow="本机设置" title="AI、同步与更新" description="错题仍以本机为主；GitHub 只保存加密副本，软件更新不会覆盖学习数据。" />
     <div className="mt-7 grid gap-6 xl:grid-cols-2">
       <section className="space-y-5 rounded-[22px] border bg-card p-6">
-        <div><h2 className="font-heading text-lg font-semibold">DeepSeek API</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">识别、分析、错题会话和今日小羊寄语才会调用。Key 不再写入公开源码。</p></div>
-        <Field label="API Key" hint="仅保存在当前设备"><Input type="password" autoComplete="off" value={draft.apiKey} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} placeholder="输入 DeepSeek API Key" /></Field>
-        <Field label="固定模型"><Input value={DEEPSEEK_MODEL} readOnly className="h-10 bg-muted" /></Field>
-        <Field label="思考模式" hint="小羊寄语固定使用快速模式"><select className={selectClass} value={draft.thinkingMode} onChange={(event) => setDraft({ ...draft, thinkingMode: event.target.value as AiSettings['thinkingMode'] })}><option value="disabled">关闭 · 快速整理</option><option value="low">低 · 简单识别</option><option value="high">高 · 日常分析</option><option value="max">最大 · 难题复盘</option></select></Field>
+        <div><h2 className="font-heading text-lg font-semibold">AI 服务</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">PDF导入、整理、讲解、连续问答、学习诊断和小羊寄语使用这里的服务。调用时相关资料会发送到当前API地址。</p></div>
+        <Field label="服务"><select aria-label="服务" className={selectClass} value={draft.provider||'deepseek'} onChange={event=>switchProvider(event.target.value as 'openai'|'deepseek')}><option value="openai">GPT · OpenAI兼容中转</option><option value="deepseek">DeepSeek</option></select></Field>
+        <Field label="API 地址"><Input value={draft.baseUrl||''} onChange={event=>setDraft({...draft,baseUrl:event.target.value})} placeholder="https://api.lingxiaihub.com" /></Field>
+        <Field label="API Key" hint="本机使用，备份不包含密钥"><Input type="password" autoComplete="off" value={draft.apiKey} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} placeholder="输入 API Key" /></Field>
+        <Field label="模型名称"><Input list="ai-models" value={draft.model} onChange={event=>setDraft({...draft,model:event.target.value})} /><datalist id="ai-models">{['gpt-5.5','gpt-5.6-sol','gpt-6-sol','gpt-6-astra','gpt-6.1-sol',DEEPSEEK_MODEL].map(model=><option key={model} value={model} />)}</datalist></Field>
+        {draft.provider==='openai'&&<Field label="接口模式" hint="PDF导入推荐原生文件模式"><select aria-label="接口模式" className={selectClass} value={draft.transport||'responses'} onChange={event=>setDraft({...draft,transport:event.target.value as 'responses'|'chat'})}><option value="responses">Responses · 原生PDF</option><option value="chat">Chat Completions · 兼容接口</option></select></Field>}
+        <Field label="思考模式" hint="小羊寄语固定使用快速模式"><select aria-label="思考模式" className={selectClass} value={draft.thinkingMode} onChange={(event) => setDraft({ ...draft, thinkingMode: event.target.value as AiSettings['thinkingMode'] })}><option value="disabled">关闭 · 快速整理</option><option value="low">低 · 简单识别</option><option value="high">高 · 日常分析</option><option value="max">最大 · 难题复盘</option></select></Field>
         <div className="flex items-start gap-3 rounded-xl border border-[#cfe1d5] bg-[#edf6ef] px-3 py-3 text-xs leading-5 text-[#315f42]"><Check className="mt-0.5 size-4 shrink-0" /><span><strong className="block">花生13单题方法库已接入</strong>分析和连续追问会按模块、考点检索，来源版本 6a43d77。</span></div>
-        <Button onClick={saveAi}><Check /> 保存 DeepSeek 设置</Button>
+        <div className="flex gap-2"><Button onClick={saveAi}><Check /> 保存 AI 设置</Button><Button variant="outline" disabled={testing||!draft.apiKey} onClick={()=>void testAi()}>{testing?<Loader2 className="animate-spin"/>:<RefreshCw/>} 测试连接</Button></div>
       </section>
 
       <section className="space-y-5 rounded-[22px] border bg-card p-6">

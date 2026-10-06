@@ -12,7 +12,7 @@ export function reconcileMaterials(questions: WrongQuestion[]): WrongQuestion[] 
 }
 
 export function questionContext(q:WrongQuestion) {
-  return { sharedMaterial:q.material ? {title:q.material.title,text:q.material.text} : undefined, subquestionNumber:q.subquestionNumber };
+  return { sharedMaterial:q.material ? {title:q.material.title,text:q.material.text} : undefined, subquestionNumber:q.subquestionNumber,documentNotes:q.extractedNotes,answerEvidence:q.answerEvidence,pdfSource:q.pdfSource,answerConfirmed:q.answerConfirmed,correctReasoning:q.correctReasoning,pitfall:q.pitfall };
 }
 export function questionImages(q:WrongQuestion, includeAnalysis=true) {
   return [

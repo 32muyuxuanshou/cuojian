@@ -1,4 +1,4 @@
-export type AnswerSource = 'official' | 'user' | 'ai';
+export type AnswerSource = 'official' | 'document' | 'user' | 'ai';
 export type QuestionStatus = 'learning' | 'mastered';
 
 export interface Attempt {
@@ -46,6 +46,9 @@ export interface WrongQuestion {
   organizeError?: string;
   answerConfirmed?: boolean;
   suggestedAnswer?: string;
+  answerEvidence?: string;
+  extractedNotes?: string;
+  pdfSource?: { name:string; pages:number[] };
   extraImages?: Array<{ id: string; role: 'question' | 'material' | 'analysis'; dataUrl: string }>;
   analysisStale?: boolean;
   conversationResetAt?: string;
@@ -84,6 +87,9 @@ export interface SharedMaterial {
 }
 
 export interface AiSettings {
+  provider?: 'deepseek' | 'openai';
+  baseUrl?: string;
+  transport?: 'responses' | 'chat';
   apiKey: string;
   model: string;
   thinkingMode: 'disabled' | 'low' | 'high' | 'max';

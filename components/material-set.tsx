@@ -11,7 +11,7 @@ import {distributeCaptureGroup} from '@/lib/capture-groups';
 
 export function MaterialView({material}:{material?:SharedMaterial}) {
   if(!material)return null;
-  return <section className="mb-5 rounded-2xl border bg-muted/30 p-4"><h2 className="mb-3 font-semibold">共享资料</h2><p className="whitespace-pre-wrap text-sm leading-7">{material.text}</p>{material.images.map((src,i)=><a key={i} href={src} target="_blank" rel="noreferrer" aria-label={`放大资料图片 ${i+1}`}><img src={src} alt={`资料 ${i+1}`} className="my-3 w-full rounded border object-contain" /></a>)}</section>;
+  return <section className="mb-5 rounded-2xl border bg-muted/30 p-4"><h2 className="mb-3 font-semibold">共享资料</h2>{material.images.map((src,i)=><a key={i} href={src} target="_blank" rel="noreferrer" aria-label={`放大资料图片 ${i+1}`}><img src={src} alt={`资料 ${i+1}`} className="my-3 w-full rounded border object-contain" /></a>)}{material.images.length&&material.text?<details><summary className="text-xs text-muted-foreground">查看识别文字</summary><p className="mt-2 whitespace-pre-wrap text-sm leading-7">{material.text}</p></details>:<p className="whitespace-pre-wrap text-sm leading-7">{material.text}</p>}</section>;
 }
 
 export function MaterialSetEditor({seed=[],existing=false,onSaved,onCancel}:{seed?:WrongQuestion[];existing?:boolean;onSaved:()=>Promise<void>;onCancel:()=>void}) {
