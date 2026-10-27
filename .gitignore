@@ -38,6 +38,7 @@ next-env.d.ts
 /outputs/
 /work/
 /mobile-dist/
+/public/builtin-library/
 /android/.gradle/
 /android/app/build/
 /android/app/src/main/assets/public/

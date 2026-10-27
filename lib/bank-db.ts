@@ -68,9 +68,18 @@ export async function commitBankImport(
       'readwrite',
     );
     const store = tx.objectStore('questions');
+    let previous: BankImportRecord | undefined;
+    const marker = tx.objectStore('bankImports').get(draft.id);
+    marker.onsuccess = () => {
+      previous = marker.result as BankImportRecord | undefined;
+    };
     const req = store.getAll();
     let record: BankImportRecord;
     req.onsuccess = () => {
+      if (previous) {
+        record = previous;
+        return;
+      }
       const current = req.result as WrongQuestion[];
       const ids = new Set(current.map((q) => q.id));
       const fingerprints = new Set(

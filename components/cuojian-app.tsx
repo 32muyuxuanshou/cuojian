@@ -96,6 +96,11 @@ import {
 } from '@/lib/portable-backup';
 import { storeAssets } from '@/lib/bank-db';
 import { QuestionEditor } from '@/components/question-editor';
+import { ensureBuiltinLibrary } from '@/lib/builtin-library';
+import {
+  canAdoptDocumentAnswer,
+  confirmDocumentAnswers,
+} from '@/lib/confirm-answers';
 
 type View =
   | 'dashboard'
@@ -131,6 +136,8 @@ export function CuojianApp() {
     setView('materialSet');
   }
   const [questions, setQuestions] = useState<WrongQuestion[]>([]);
+  const [openingMessage, setOpeningMessage] = useState('正在打开本地错题库');
+  const [libraryNotice, setLibraryNotice] = useState('');
   const [view, setView] = useState<View>('dashboard');
   const [selectedId, setSelectedId] = useState<string>();
   const [loading, setLoading] = useState(true);
@@ -285,6 +292,21 @@ export function CuojianApp() {
       }
     }
     setTimeout(async () => {
+      try {
+        const installed = await ensureBuiltinLibrary(setOpeningMessage);
+        if (installed) {
+          localStorage.setItem('cuojian_initialized', 'true');
+          setLibraryNotice(
+            `内置题库已就绪：新增 ${installed.questionIds.length} 道，跳过 ${installed.skipped} 道重复记录；原有学习档案已保留。原卷答案仍需核对，未确认记录不判分。`,
+          );
+        }
+      } catch (error) {
+        setLibraryNotice(
+          error instanceof Error
+            ? error.message
+            : '内置题库暂未载入，请重新打开软件重试。',
+        );
+      }
       await refresh();
       if (nextSync.autoSync && syncReady(nextSync)) void performSync(nextSync);
       const autoUpdate =
@@ -386,19 +408,31 @@ export function CuojianApp() {
         />
         <section className="min-w-0 px-4 pb-28 pt-5 sm:px-6 lg:px-7 lg:pb-10 lg:pt-7">
           {loading ? (
-            <LoadingState />
+            <div className="grid min-h-[70vh] place-items-center">
+              <output className="flex items-center gap-3 text-sm text-muted-foreground">
+                <Loader2 className="animate-spin" />
+                {openingMessage}
+              </output>
+            </div>
           ) : view === 'dashboard' ? (
-            <Dashboard
-              questions={wrongQuestions}
-              due={due}
-              correctAttempts={correctAttempts}
-              mastery={mastery}
-              onAdd={() => navigate('add')}
-              onSearch={() => navigate('library')}
-              onOpen={openQuestion}
-              onStartPractice={() => startSession('practice', due, true)}
-              onStartReview={() => startSession('review', due, true)}
-            />
+            <>
+              {libraryNotice && (
+                <p className="mb-5 rounded-xl border bg-blue-50 p-4 text-sm leading-6">
+                  {libraryNotice}
+                </p>
+              )}
+              <Dashboard
+                questions={wrongQuestions}
+                due={due}
+                correctAttempts={correctAttempts}
+                mastery={mastery}
+                onAdd={() => navigate('add')}
+                onSearch={() => navigate('library')}
+                onOpen={openQuestion}
+                onStartPractice={() => startSession('practice', due, true)}
+                onStartReview={() => startSession('review', due, true)}
+              />
+            </>
           ) : view === 'library' ? (
             <Library
               questions={archived}
@@ -658,7 +692,7 @@ function Dashboard({
             className="h-11 flex-1 rounded-xl bg-card px-4 sm:flex-none"
             onClick={onSearch}
           >
-            <Search /> 搜索错题
+            <Search /> 题库选题
           </Button>
           <Button
             size="lg"
@@ -761,16 +795,16 @@ function Dashboard({
           ) : (
             <Empty
               title="今天没有待复习的题"
-              body="可以去错题库查看已录入内容，或者录入一道新错题。"
-              action="录入错题"
-              onAction={onAdd}
+              body="可以从题库选题练习，做错的题会进入这里。"
+              action="去题库练习"
+              onAction={onSearch}
             />
           )}
         </section>
         <aside className="space-y-4">
           <div className="rounded-[22px] border bg-card p-5 shadow-[0_12px_40px_rgba(28,42,47,.05)]">
             <div className="flex items-center justify-between">
-              <h2 className="font-heading text-base font-semibold">本地档案</h2>
+              <h2 className="font-heading text-base font-semibold">错题档案</h2>
               <span className="text-sm font-semibold text-primary">
                 {questions.length} 道
               </span>
@@ -860,6 +894,33 @@ function Library({
   const [to, setTo] = useState('');
   const [sort, setSort] = useState('captured-desc');
   const [deleting, setDeleting] = useState(false);
+  const [adopting, setAdopting] = useState(false);
+  const [adoptionMessage, setAdoptionMessage] = useState('');
+  const adoptable = questions.filter(
+    (q) => selectedIds.includes(q.id) && canAdoptDocumentAnswer(q),
+  );
+  async function adoptAnswers() {
+    if (
+      !adoptable.length ||
+      adopting ||
+      !confirm(
+        `将这 ${adoptable.length} 道题的原卷候选答案设为你确认的参考答案？请仅在已经核对答案时继续。有疑点、串题和已有答案的记录会跳过。`,
+      )
+    )
+      return;
+    setAdopting(true);
+    try {
+      const count = await confirmDocumentAnswers(adoptable);
+      await onChanged();
+      setAdoptionMessage(
+        `已确认 ${count} 道参考答案，保留原有作答；发生变化的记录已跳过。`,
+      );
+    } catch (error) {
+      setAdoptionMessage(error instanceof Error ? error.message : '确认失败');
+    } finally {
+      setAdopting(false);
+    }
+  }
   async function removeSelected() {
     const ids = selectedIds.filter((id) => questions.some((q) => q.id === id));
     if (
@@ -1209,6 +1270,22 @@ function Library({
             <X className="size-4" />
           </button>
         </div>
+      )}
+      {selectedIds.length > 0 && adoptable.length > 0 && (
+        <Button
+          variant="outline"
+          className="mt-3"
+          disabled={adopting}
+          onClick={() => void adoptAnswers()}
+        >
+          {adopting ? <Loader2 className="animate-spin" /> : <Check />}
+          采用已核对的原卷候选答案 · {adoptable.length} 道
+        </Button>
+      )}
+      {adoptionMessage && (
+        <p className="mt-3 rounded-lg bg-blue-50 p-3 text-sm">
+          {adoptionMessage}
+        </p>
       )}
       {filtered.length ? (
         <>
@@ -3019,15 +3096,7 @@ function Empty({
     </div>
   );
 }
-function LoadingState() {
-  return (
-    <div className="grid min-h-[70vh] place-items-center">
-      <div className="flex items-center gap-3 text-sm text-muted-foreground">
-        <Loader2 className="animate-spin" /> 正在打开本地错题库
-      </div>
-    </div>
-  );
-}
+
 function countBy(values: string[]) {
   const map = new Map<string, number>();
   values.forEach((v) => map.set(v, (map.get(v) || 0) + 1));

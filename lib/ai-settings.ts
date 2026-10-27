@@ -33,7 +33,12 @@ export function loadAiSettings(storage: Pick<Storage, 'getItem'>): AiSettings {
       const saved = { ...defaultAiSettings(), ...JSON.parse(current) };
       if (
         (saved.baseUrl || '').includes('api.lingxiaihub.com') &&
-        ['gpt-5.5', 'deepseek-v4-flash', 'deepseek-flash'].includes(saved.model)
+        [
+          'gpt-5.5',
+          'deepseek-v4-flash',
+          'deepseek-flash',
+          'deepseek-v4.1-flash',
+        ].includes(saved.model)
       )
         return {
           ...saved,
