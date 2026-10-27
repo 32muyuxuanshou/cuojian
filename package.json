@@ -25,6 +25,8 @@
     "cmdk": "1.1.1",
     "date-fns": "4.1.0",
     "embla-carousel-react": "8.5.2",
+    "fast-xml-parser": "^5.11.2",
+    "fflate": "^0.8.3",
     "input-otp": "1.4.2",
     "lucide-react": "1.31.0",
     "pdf-lib": "^1.17.1",

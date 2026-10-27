@@ -12,6 +12,8 @@ export interface Attempt {
   revealedAnswer?: boolean;
   causeType?: string;
   personalCause?: string;
+  graded?: boolean;
+  referenceAnswer?: string;
 }
 
 export interface AiAnalysis {
@@ -33,6 +35,28 @@ export interface QuestionMessage {
 
 export interface WrongQuestion {
   id: string;
+  collection?: 'bank' | 'wrong';
+  responseType?: 'single' | 'multiple' | 'blank' | 'subjective';
+  questionImageAssets?: string[];
+  optionImageAssets?: Record<string, string[]>;
+  originalImageAssets?: string[];
+  imageContainsHints?: boolean;
+  originalChoice?: string;
+  originalAnswer?: string;
+  reviewIssues?: string[];
+  contentNeedsReview?: boolean;
+  provenance?: {
+    batchId: string;
+    workbook: string;
+    sheet: string;
+    row: number;
+    section: string;
+    number: string;
+    fingerprint: string;
+    sourcePdfId?: string;
+    printedPages?: number[];
+    pdfPages?: number[];
+  };
   material?: SharedMaterial;
   subquestionNumber?: string;
   captureGroupId?: string;
@@ -42,19 +66,31 @@ export interface WrongQuestion {
   organizedAt?: string;
   deletedAt?: string;
   inbox?: boolean;
-  organizeState?: 'pending' | 'queued' | 'running' | 'done' | 'review' | 'error';
+  organizeState?:
+    | 'pending'
+    | 'queued'
+    | 'running'
+    | 'done'
+    | 'review'
+    | 'error';
   organizeError?: string;
   answerConfirmed?: boolean;
   suggestedAnswer?: string;
   answerEvidence?: string;
   extractedNotes?: string;
-  pdfSource?: { name:string; pages:number[] };
-  extraImages?: Array<{ id: string; role: 'question' | 'material' | 'analysis'; dataUrl: string }>;
+  pdfSource?: { name: string; pages: number[] };
+  extraImages?: Array<{
+    id: string;
+    role: 'question' | 'material' | 'analysis';
+    dataUrl: string;
+  }>;
   analysisStale?: boolean;
   conversationResetAt?: string;
   createdAt: string;
   updatedAt: string;
   source: string;
+  personalCause?: string;
+  causeType?: string;
   sourceVerified: boolean;
   stem: string;
   options: Record<string, string>;
@@ -83,6 +119,7 @@ export interface SharedMaterial {
   title: string;
   text: string;
   images: string[];
+  imageAssets?: string[];
   updatedAt: string;
 }
 
@@ -102,6 +139,7 @@ export interface GithubSyncSettings {
   token: string;
   passphrase: string;
   autoSync: boolean;
+  includeBank?: boolean;
 }
 
 export interface SyncStatus {
@@ -136,7 +174,15 @@ export interface AiStudyDiagnosis {
   caution?: string;
 }
 
-export const modules = ['全部', '资料分析', '数量关系', '言语理解', '判断推理', '常识判断', '申论'];
+export const modules = [
+  '全部',
+  '资料分析',
+  '数量关系',
+  '言语理解',
+  '判断推理',
+  '常识判断',
+  '申论',
+];
 
 export const causeTypes = [
   '知识盲区',

@@ -7,6 +7,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(android.os.Bundle savedInstanceState) {
         registerPlugin(NativeAppUpdatePlugin.class);
         registerPlugin(NativeCapturePlugin.class);
+        registerPlugin(NativeExportPlugin.class);
         super.onCreate(savedInstanceState);
         CaptureStore.receive(this, getIntent());
     }
